@@ -35,9 +35,13 @@
 
   const synth = window.speechSynthesis;
   let selectedVoice = null;
-  let routeSpeechSteps = [];
-  let currentSpeechIndex = 0;
-  let currentUtterance = null;
+  let watchId = null;
+  let navigationActive = false;
+  let navigationPaused = false;
+  let navigationStepIndex = 0;
+  let selectedRouteSteps = [];
+  let autoCenterMap = true;
+  let lastSpokenStepIndex = -1;
 
   function setRoutesMessage(html) {
     routesContent.innerHTML = html;
@@ -67,7 +71,7 @@
     routeLayers = [];
     currentRoutes = [];
     selectedRouteIndex = null;
-    stopRouteSpeech(true);
+    stopNavigation(true);
     hideCurrentStep();
 
     if (destinationMarker) {
@@ -136,123 +140,238 @@
     currentStepText.textContent = "";
   }
 
-  function buildSpeechStepsFromRoute(route) {
-    const summary = route.properties?.summary || {};
-    const segments = route.properties?.segments || [];
-    const steps = [];
+  function getDistanceMeters(lat1, lng1, lat2, lng2) {
+    const R = 6371000;
+    const toRad = deg => deg * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
 
-    steps.push(`Ruta seleccionada. Distancia ${formatDistance(summary.distance || 0)}. Tiempo estimado ${formatDuration(summary.duration || 0)}.`);
+  function buildNavigationSteps(route) {
+    const steps = [];
+    const segments = route.properties?.segments || [];
+    const geometryCoords = route.geometry?.coordinates || [];
 
     segments.forEach(segment => {
       (segment.steps || []).forEach(step => {
-        const distanceText = formatDistance(step.distance || 0);
-        const instructionText = step.instruction || "Continúa";
-        steps.push(`En ${distanceText}, ${instructionText}.`);
+        let targetLat = null;
+        let targetLng = null;
+
+        if (Array.isArray(step.way_points) && step.way_points.length > 0) {
+          const endIndex = step.way_points[1];
+          const coord = geometryCoords[endIndex];
+          if (coord) {
+            targetLng = coord[0];
+            targetLat = coord[1];
+          }
+        }
+
+        steps.push({
+          instruction: step.instruction || "Continúa",
+          distance: step.distance || 0,
+          way_points: step.way_points || [],
+          lat: targetLat,
+          lng: targetLng
+        });
       });
     });
-
-    steps.push("Has llegado al final de las indicaciones.");
     return steps;
   }
 
-  function speakNextRouteInstruction() {
-    if (currentSpeechIndex >= routeSpeechSteps.length) {
-      currentUtterance = null;
-      return;
+  function updateUserMarkerLive(lat, lng, heading = null) {
+    userLocation = { lat, lng };
+
+    if (!userMarker) {
+      userMarker = L.marker([lat, lng]).addTo(map).bindPopup("Tu ubicación");
+    } else {
+      userMarker.setLatLng([lat, lng]);
     }
 
-    const text = routeSpeechSteps[currentSpeechIndex];
-    showCurrentStep(text);
-
-    currentUtterance = new SpeechSynthesisUtterance(text);
-    currentUtterance.lang = "es-PE";
-    currentUtterance.rate = 1;
-    currentUtterance.pitch = 1;
-    currentUtterance.volume = 1;
-
-    if (selectedVoice) {
-      currentUtterance.voice = selectedVoice;
+    if (autoCenterMap) {
+      map.setView([lat, lng], Math.max(map.getZoom(), 18), { animate: true });
     }
 
-    currentUtterance.onend = () => {
-      currentSpeechIndex++;
-      renderRoutesList();
-      speakNextRouteInstruction();
-    };
+    if (typeof heading === "number" && !Number.isNaN(heading)) {
+      compassNeedle.style.transform = `rotate(${heading}deg)`;
+    }
+  }
 
-    currentUtterance.onerror = () => {
-      currentSpeechIndex++;
-      renderRoutesList();
-      speakNextRouteInstruction();
-    };
+  function showNavigationInstruction(stepIndex) {
+    if (!selectedRouteSteps[stepIndex]) return;
 
-    synth.speak(currentUtterance);
+    const step = selectedRouteSteps[stepIndex];
+    showCurrentStep(step.instruction);
+
+    if (lastSpokenStepIndex !== stepIndex) {
+      speakText(step.instruction, true);
+      lastSpokenStepIndex = stepIndex;
+    }
+
     renderRoutesList();
   }
 
-  function startRouteSpeech() {
+  function checkNavigationProgress(lat, lng) {
+    if (!navigationActive || navigationPaused || !selectedRouteSteps.length) return;
+
+    const currentStep = selectedRouteSteps[navigationStepIndex];
+    if (!currentStep) {
+      speakText("Has llegado a tu destino.", true);
+      stopNavigation(true);
+      return;
+    }
+
+    if (currentStep.lat == null || currentStep.lng == null) {
+      return;
+    }
+
+    const distanceToStep = getDistanceMeters(lat, lng, currentStep.lat, currentStep.lng);
+
+    if (distanceToStep <= 18 && lastSpokenStepIndex !== navigationStepIndex) {
+      showNavigationInstruction(navigationStepIndex);
+    }
+
+    if (distanceToStep <= 8) {
+      navigationStepIndex++;
+
+      if (navigationStepIndex < selectedRouteSteps.length) {
+        showNavigationInstruction(navigationStepIndex);
+      } else {
+        speakText("Has llegado a tu destino.", true);
+        stopNavigation(true);
+      }
+    }
+  }
+
+  function startNavigation() {
+    if (navigationPaused && watchId !== null && selectedRouteSteps.length) {
+      navigationPaused = false;
+      navigationActive = true;
+      autoCenterMap = true;
+      speakText("Trayecto reanudado.", true);
+      showNavigationInstruction(navigationStepIndex);
+      return;
+    }
+
+    if (navigationActive && watchId !== null) {
+      speakText("El trayecto ya está activo.", true);
+      return;
+    }
+
     if (selectedRouteIndex === null || !currentRoutes[selectedRouteIndex]) {
       speakText("Primero debes elegir una ruta.", true);
       return;
     }
 
-    synth.cancel();
-    routeSpeechSteps = buildSpeechStepsFromRoute(currentRoutes[selectedRouteIndex]);
-    currentSpeechIndex = 0;
-    speakNextRouteInstruction();
-  }
-
-  function pauseRouteSpeech() {
-    if (synth.speaking && !synth.paused) {
-      synth.pause();
-    }
-  }
-
-  function resumeRouteSpeech() {
-    if (synth.paused) {
-      synth.resume();
-    }
-  }
-
-  function repeatCurrentInstruction() {
-    if (!routeSpeechSteps.length) {
-      speakText("No hay una indicación activa para repetir.", true);
+    if (!navigator.geolocation) {
+      speakText("Tu navegador no soporta seguimiento de ubicación.", true);
       return;
     }
 
-    const idx = Math.min(currentSpeechIndex, routeSpeechSteps.length - 1);
-    const text = routeSpeechSteps[idx] || routeSpeechSteps[idx - 1];
+    selectedRouteSteps = buildNavigationSteps(currentRoutes[selectedRouteIndex]);
+    navigationStepIndex = 0;
+    lastSpokenStepIndex = -1;
+    navigationActive = true;
+    navigationPaused = false;
+    autoCenterMap = true;
 
-    if (!text) return;
-
-    synth.cancel();
-
-    currentUtterance = new SpeechSynthesisUtterance(text);
-    currentUtterance.lang = "es-PE";
-    currentUtterance.rate = 1;
-    currentUtterance.pitch = 1;
-    currentUtterance.volume = 1;
-
-    if (selectedVoice) {
-      currentUtterance.voice = selectedVoice;
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
     }
 
-    currentUtterance.onend = () => {
-      speakNextRouteInstruction();
-    };
+    speakText("Trayecto iniciado. Sigue la ruta seleccionada.", true);
 
-    showCurrentStep(text);
-    synth.speak(currentUtterance);
+    if (selectedRouteSteps.length > 0) {
+      showNavigationInstruction(0);
+    }
+
+    watchId = navigator.geolocation.watchPosition(
+      position => {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        const heading = position.coords.heading;
+        const accuracy = position.coords.accuracy;
+
+        updateUserMarkerLive(lat, lng, heading);
+
+        if (accuracy && accuracy > 40) return;
+        checkNavigationProgress(lat, lng);
+      },
+      error => {
+        console.error("Error de navegación:", error);
+        speakText("No se pudo actualizar tu ubicación en tiempo real.", true);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 1000,
+        timeout: 10000
+      }
+    );
   }
 
-  function stopRouteSpeech(silent = false) {
-    synth.cancel();
-    routeSpeechSteps = [];
-    currentSpeechIndex = 0;
-    currentUtterance = null;
-    if (!silent) {
-      speakText("Lectura detenida.", true);
+  function pauseNavigation() {
+    if (!navigationActive || watchId === null) {
+      speakText("No hay una navegación activa.", true);
+      return;
     }
+
+    navigationPaused = true;
+    autoCenterMap = false;
+    synth.cancel();
+    speakText("Trayecto en pausa.", true);
+    renderRoutesList();
+  }
+
+  function recenterMap() {
+    if (!userLocation) {
+      speakText("No se encontró tu ubicación actual.", true);
+      return;
+    }
+
+    autoCenterMap = true;
+    map.setView([userLocation.lat, userLocation.lng], Math.max(map.getZoom(), 18), { animate: true });
+    speakText("Mapa recentrado en tu ubicación.", true);
+  }
+
+  function repeatCurrentInstruction() {
+    if (!navigationActive || !selectedRouteSteps.length) {
+      speakText("No hay una navegación activa.", true);
+      return;
+    }
+
+    const step = selectedRouteSteps[navigationStepIndex];
+    if (!step) return;
+
+    showCurrentStep(step.instruction);
+    speakText(step.instruction, true);
+  }
+
+  function stopNavigation(silent = false) {
+    navigationActive = false;
+    navigationPaused = false;
+
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+
+    navigationStepIndex = 0;
+    selectedRouteSteps = [];
+    lastSpokenStepIndex = -1;
+    autoCenterMap = true;
+
+    synth.cancel();
+
+    if (!silent) {
+      speakText("Trayecto detenido.", true);
+    }
+
+    renderRoutesList();
   }
 
   function renderSuggestions(results) {
@@ -408,21 +527,17 @@
   }
 
   function buildInstructionsHtml(route) {
-    const segments = route.properties.segments || [];
+    const steps = buildNavigationSteps(route);
     let html = `<div class="instructions">`;
 
-    let counter = 1;
-    segments.forEach(segment => {
-      (segment.steps || []).forEach((step, idx) => {
-        const activeClass = currentSpeechIndex - 1 === idx ? "active-step" : "";
-        html += `
-          <div class="step ${activeClass}">
-            <div><strong>${counter}.</strong> ${escapeHtml(step.instruction || "Continúa")}</div>
-            <div class="distance">${formatDistance(step.distance || 0)}</div>
-          </div>
-        `;
-        counter++;
-      });
+    steps.forEach((step, idx) => {
+      const activeClass = navigationActive && idx === navigationStepIndex ? "active-step" : "";
+      html += `
+        <div class="step ${activeClass}">
+          <div><strong>${idx + 1}.</strong> ${escapeHtml(step.instruction || "Continúa")}</div>
+          <div class="distance">${formatDistance(step.distance || 0)}</div>
+        </div>
+      `;
     });
 
     html += `</div>`;
@@ -438,7 +553,7 @@
     let html = `
       <h3 class="panel-title">Rutas peatonales</h3>
       <div class="sub-note">
-        Elige una ruta y luego pulsa "Escuchar".
+        Elige una ruta y pulsa "Iniciar trayecto" para navegar en vivo.
       </div>
     `;
 
@@ -476,7 +591,7 @@
 
   function selectRoute(index) {
     selectedRouteIndex = index;
-    stopRouteSpeech(true);
+    stopNavigation(true);
     hideCurrentStep();
     drawRoutes();
     renderRoutesList();
@@ -487,7 +602,7 @@
 
     const summary = currentRoutes[index]?.properties?.summary || {};
     speakText(
-      `Ruta ${index + 1} seleccionada. Distancia ${formatDistance(summary.distance || 0)}. Tiempo estimado ${formatDuration(summary.duration || 0)}. Pulsa escuchar para oír las indicaciones.`,
+      `Ruta ${index + 1} seleccionada. Distancia ${formatDistance(summary.distance || 0)}. Tiempo estimado ${formatDuration(summary.duration || 0)}. Pulsa iniciar trayecto para comenzar la navegación.`,
       true
     );
   }
@@ -593,18 +708,6 @@
       }, true);
     }
 
-    if (navigator.geolocation) {
-      navigator.geolocation.watchPosition((pos) => {
-        if (typeof pos.coords.heading === "number" && !Number.isNaN(pos.coords.heading)) {
-          setHeading(pos.coords.heading);
-        }
-      }, () => {}, {
-        enableHighAccuracy: true,
-        maximumAge: 1000,
-        timeout: 10000
-      });
-    }
-
     setHeading(currentHeading);
   }
 
@@ -683,11 +786,11 @@
   });
 
   gpsBtn.addEventListener("click", centerOnUser);
-  btnSpeak.addEventListener("click", startRouteSpeech);
-  btnPause.addEventListener("click", pauseRouteSpeech);
-  btnResume.addEventListener("click", resumeRouteSpeech);
+  btnSpeak.addEventListener("click", startNavigation);
+  btnPause.addEventListener("click", pauseNavigation);
+  btnResume.addEventListener("click", recenterMap);
   btnRepeat.addEventListener("click", repeatCurrentInstruction);
-  btnStop.addEventListener("click", () => stopRouteSpeech());
+  btnStop.addEventListener("click", () => stopNavigation());
 
   loadSpanishVoice();
   if (speechSynthesis.onvoiceschanged !== undefined) {
