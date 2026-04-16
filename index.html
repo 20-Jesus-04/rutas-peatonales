@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Rutas peatonales inteligentes</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="search-panel">
+  <div class="search-top">
+    <div class="search-row">
+      <div class="search-input-wrap">
+        <span class="search-icon">🔎</span>
+        <input
+          id="searchInput"
+          class="search-input"
+          type="text"
+          placeholder="Buscar destino..."
+          autocomplete="off"
+        />
+      </div>
+      <button id="gpsBtn" class="gps-btn" title="Centrar en mi ubicación">📍</button>
+    </div>
+    <div class="hint">Escribe al menos 3 letras. Usa ↑ ↓ y Enter para elegir.</div>
+  </div>
+  <div id="suggestions" class="suggestions"></div>
+</div>
+
+<div class="routes-panel">
+  <h3 class="panel-title">Rutas peatonales</h3>
+  <div class="sub-note">
+    El usuario elige la ruta y luego puede escuchar las indicaciones por voz.
+  </div>
+
+  <div class="voice-controls">
+    <button id="btnSpeak" class="voice-btn">🔊 Escuchar</button>
+    <button id="btnPause" class="voice-btn secondary">⏸ Pausar</button>
+    <button id="btnResume" class="voice-btn secondary">▶ Continuar</button>
+    <button id="btnRepeat" class="voice-btn secondary">🔁 Repetir</button>
+    <button id="btnStop" class="voice-btn secondary">⏹ Detener</button>
+  </div>
+
+  <div id="currentStepBox" class="current-step-box" style="display:none;">
+    <div class="current-step-title">Indicación actual</div> 
+    <div id="currentStepText" class="current-step-text"></div>
+  </div>
+
+  <div id="routesContent" class="status">Obteniendo tu ubicación…</div>
+</div>
+
+<div class="compass" title="Brújula">
+  <div class="compass-ring">
+    <div class="compass-n">N</div>
+    <div id="compassNeedle" class="compass-needle"></div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
