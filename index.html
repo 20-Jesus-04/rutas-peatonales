@@ -27,6 +27,14 @@
       <button id="gpsBtn" class="gps-btn" title="Centrar en mi ubicación">📍</button>
     </div>
     <div class="hint">Escribe al menos 3 letras. Usa ↑ ↓ y Enter para elegir.</div>
+    <div class="map-style-row">
+      <label class="map-style-label" for="mapStyleSelect">Mapa</label>
+      <select id="mapStyleSelect" class="map-style-select" aria-label="Tipo de mapa">
+        <option value="streets">Calles</option>
+        <option value="contrast">Alto contraste</option>
+        <option value="satellite">Satélite</option>
+      </select>
+    </div>
   </div>
   <div id="suggestions" class="suggestions"></div>
 </div>
@@ -34,13 +42,33 @@
 <div class="routes-panel">
   <h3 class="panel-title">Rutas peatonales</h3>
   <div class="sub-note">
-    El usuario elige la ruta y luego puede escuchar las indicaciones por voz.
+    Diseñada para uso directo y también para asistentes de personas con discapacidad visual.
+  </div>
+
+  <div class="quick-guide" aria-label="Guía rápida de uso">
+    <div class="guide-step">
+      <span class="guide-index">1</span>
+      <span class="guide-text">Busca el destino</span>
+    </div>
+    <div class="guide-step">
+      <span class="guide-index">2</span>
+      <span class="guide-text">Elige la mejor ruta</span>
+    </div>
+    <div class="guide-step">
+      <span class="guide-index">3</span>
+      <span class="guide-text">Inicia y sigue la voz</span>
+    </div>
+  </div>
+
+  <div id="navStatus" class="nav-status idle" aria-live="polite">
+    <span class="nav-status-dot" aria-hidden="true"></span>
+    <span id="navStatusText">Listo para iniciar trayecto</span>
   </div>
 
   <div class="voice-controls">
     <button id="btnSpeak" class="voice-btn">▶ Iniciar trayecto</button>
     <button id="btnPause" class="voice-btn secondary">⏸ Pausar trayecto</button>
-    <button id="btnResume" class="voice-btn secondary">🎯 Recentrar mapa</button>
+    <button id="btnResume" class="voice-btn secondary">▶ Continuar trayecto</button>
     <button id="btnRepeat" class="voice-btn secondary">🔁 Repetir</button>
     <button id="btnStop" class="voice-btn secondary">⏹ Detener trayecto</button>
   </div>
@@ -48,6 +76,10 @@
   <div id="currentStepBox" class="current-step-box" style="display:none;">
     <div class="current-step-title">Indicación actual</div> 
     <div id="currentStepText" class="current-step-text"></div>
+    <div id="quickNavControls" class="quick-nav-controls" aria-label="Controles rápidos de navegación">
+      <button id="btnQuickPause" class="quick-nav-btn quick-pause" type="button">⏸ Pausar</button>
+      <button id="btnQuickStop" class="quick-nav-btn quick-stop" type="button">⏹ Detener</button>
+    </div>
   </div>
 
   <div id="routesContent" class="status">Obteniendo tu ubicación…</div>
