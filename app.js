@@ -42,6 +42,9 @@
   let currentRoutes = [];
   let routeLayers = [];
   let selectedRouteIndex = null;
+  let currentDestination = null;
+  let lastDistanceToDestination = null;
+  let rerouteInProgress = false;
 
   const searchInput = document.getElementById("searchInput");
   const gpsBtn = document.getElementById("gpsBtn");
@@ -74,6 +77,21 @@
   let lastSpokenStepIndex = -1;
   let distanceToCurrentStep = null;
   let announcedStepAlerts = new Set();
+
+  function createUserIcon(heading = 0) {
+    const rotation = Number.isFinite(heading) ? heading : 0;
+    return L.divIcon({
+      className: "user-location-marker",
+      html: `
+        <div class="user-location-core" style="transform: rotate(${rotation}deg)">
+          <div class="user-location-arrow"></div>
+        </div>
+        <div class="user-location-pulse"></div>
+      `,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14]
+    });
+  }
 
   function setMapStyle(styleKey, silent = false) {
     const selectedStyle = baseMapConfigs[styleKey] ? styleKey : "streets";
@@ -182,6 +200,206 @@
   function formatMetersText(distance) {
     const meters = Math.max(1, Math.round(Number(distance) || 0));
     return `${meters} metros`;
+  }
+
+  function normalizeSearchText(text) {
+    return String(text || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function extractHouseNumber(text) {
+    const match = String(text || "").match(/\b\d{1,6}[a-zA-Z]?\b/);
+    return match ? match[0] : "";
+  }
+
+  function createSuggestionModel(data) {
+    return {
+      id: data.id,
+      lat: data.lat,
+      lng: data.lng,
+      title: data.title || "Destino",
+      subtitle: data.subtitle || "",
+      fullLabel: data.fullLabel || data.title || "Destino",
+      country: data.country || "",
+      city: data.city || "",
+      street: data.street || "",
+      houseNumber: data.houseNumber || "",
+      source: data.source || "ors"
+    };
+  }
+
+  function normalizeOrsSuggestion(item) {
+    const coords = item?.geometry?.coordinates || [];
+    const props = item?.properties || {};
+    const lng = Number(coords[0]);
+    const lat = Number(coords[1]);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    const title = props.name || (props.label || "").split(",")[0] || "Destino";
+    const fullLabel = props.label || title;
+    const street = props.street || "";
+    const houseNumber = props.housenumber || extractHouseNumber(fullLabel);
+    const city = props.locality || props.county || props.region || "";
+
+    return createSuggestionModel({
+      id: props.id || `${lat},${lng},ors`,
+      lat,
+      lng,
+      title,
+      subtitle: fullLabel,
+      fullLabel,
+      country: props.country || "",
+      city,
+      street,
+      houseNumber,
+      source: "ors"
+    });
+  }
+
+  function normalizeNominatimSuggestion(item) {
+    const lat = Number(item?.lat);
+    const lng = Number(item?.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    const address = item?.address || {};
+    const title = address.road || address.pedestrian || address.amenity || address.building || item?.name || String(item?.display_name || "").split(",")[0] || "Destino";
+    const fullLabel = item?.display_name || title;
+    const city = address.city || address.town || address.village || address.state || "";
+
+    return createSuggestionModel({
+      id: `nominatim:${item?.osm_type || "x"}:${item?.osm_id || `${lat},${lng}`}`,
+      lat,
+      lng,
+      title,
+      subtitle: fullLabel,
+      fullLabel,
+      country: address.country || "",
+      city,
+      street: address.road || address.pedestrian || "",
+      houseNumber: address.house_number || extractHouseNumber(fullLabel),
+      source: "osm"
+    });
+  }
+
+  function buildSuggestionSearchText(item) {
+    return [
+      item?.title,
+      item?.subtitle,
+      item?.fullLabel,
+      item?.street,
+      item?.houseNumber,
+      item?.city,
+      item?.country
+    ].filter(Boolean).join(" ");
+  }
+
+  function scoreSuggestion(item, query) {
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery) return 0;
+
+    const haystack = normalizeSearchText(buildSuggestionSearchText(item));
+    if (!haystack) return 0;
+
+    const tokens = normalizedQuery.split(" ").filter(Boolean);
+    const houseNumberInQuery = extractHouseNumber(normalizedQuery);
+    const title = normalizeSearchText(item?.title || "");
+    const subtitle = normalizeSearchText(item?.subtitle || item?.fullLabel || "");
+    const street = normalizeSearchText(item?.street || "");
+    const city = normalizeSearchText(item?.city || "");
+    const houseNumber = normalizeSearchText(item?.houseNumber || "");
+
+    let score = 0;
+
+    if (haystack === normalizedQuery) score += 1000;
+    if (title === normalizedQuery) score += 900;
+    if (haystack.startsWith(normalizedQuery)) score += 780;
+    if (title.startsWith(normalizedQuery)) score += 740;
+    if (haystack.includes(normalizedQuery)) score += 500;
+    if (subtitle.includes(normalizedQuery)) score += 220;
+
+    tokens.forEach(token => {
+      if (title.startsWith(token)) score += 160;
+      if (street.startsWith(token)) score += 120;
+      if (city.startsWith(token)) score += 90;
+      if (haystack.includes(token)) score += 70;
+    });
+
+    if (houseNumberInQuery) {
+      if (houseNumber === houseNumberInQuery) score += 260;
+      else if (houseNumber && houseNumber !== houseNumberInQuery) score -= 140;
+    }
+
+    if (item?.source === "ors") {
+      score += 35;
+    }
+
+    if (userLocation && Number.isFinite(item?.lat) && Number.isFinite(item?.lng)) {
+      const distance = getDistanceMeters(userLocation.lat, userLocation.lng, item.lat, item.lng);
+      score += Math.max(0, 240 - Math.min(240, distance / 20));
+    }
+
+    return score;
+  }
+
+  function sortSuggestionsByQuery(results, query) {
+    const seen = new Set();
+    const normalizedQuery = normalizeSearchText(query);
+    const queryTokenCount = normalizedQuery ? normalizedQuery.split(" ").filter(Boolean).length : 0;
+    const hasHouseNumber = Boolean(extractHouseNumber(normalizedQuery));
+
+    let smartRadiusMeters = 2000;
+    if (hasHouseNumber) {
+      smartRadiusMeters = 4500;
+    } else if (normalizedQuery.length <= 4 || queryTokenCount <= 1) {
+      smartRadiusMeters = 1200;
+    } else if (normalizedQuery.length >= 12 || queryTokenCount >= 3) {
+      smartRadiusMeters = 3000;
+    }
+
+    return (results || [])
+      .filter(item => {
+        const key = `${normalizeSearchText(item?.fullLabel || item?.title || "")}|${(Number(item?.lat) || 0).toFixed(5)}|${(Number(item?.lng) || 0).toFixed(5)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map(item => {
+        const score = scoreSuggestion(item, query);
+        let distance = Number.POSITIVE_INFINITY;
+
+        if (userLocation && Number.isFinite(item?.lat) && Number.isFinite(item?.lng)) {
+          distance = getDistanceMeters(userLocation.lat, userLocation.lng, item.lat, item.lng);
+        }
+
+        const distanceBucket = distance <= smartRadiusMeters ? 0 : 1;
+        return { item, score, distance, distanceBucket };
+      })
+      .sort((left, right) => {
+        if (left.distanceBucket !== right.distanceBucket) {
+          return left.distanceBucket - right.distanceBucket;
+        }
+        if (left.distance !== right.distance) {
+          return left.distance - right.distance;
+        }
+        return right.score - left.score;
+      })
+      .map(entry => entry.item);
+  }
+
+  function getSuggestionDistanceText(item) {
+    if (!userLocation || !Number.isFinite(item?.lat) || !Number.isFinite(item?.lng)) return "";
+
+    const distance = getDistanceMeters(userLocation.lat, userLocation.lng, item.lat, item.lng);
+    if (!Number.isFinite(distance)) return "";
+
+    return distance < 1000 ? `${Math.round(distance)} m` : `${(distance / 1000).toFixed(1)} km`;
   }
 
   function simplifyInstructionText(rawInstruction) {
@@ -366,13 +584,17 @@
     userLocation = { lat, lng };
 
     if (!userMarker) {
-      userMarker = L.marker([lat, lng]).addTo(map).bindPopup("Tu ubicación");
+      userMarker = L.marker([lat, lng], { icon: createUserIcon(heading) }).addTo(map).bindPopup("Tu ubicación");
     } else {
       userMarker.setLatLng([lat, lng]);
+      userMarker.setIcon(createUserIcon(heading));
     }
 
     if (autoCenterMap) {
-      map.setView([lat, lng], Math.max(map.getZoom(), 18), { animate: true });
+      map.setView([lat, lng], Math.max(map.getZoom(), 18), {
+        animate: true,
+        duration: 0.25
+      });
     }
 
     if (typeof heading === "number" && !Number.isNaN(heading)) {
@@ -392,6 +614,7 @@
       lastSpokenStepIndex = stepIndex;
     }
 
+    rerenderRoutes();
     renderRoutesList();
   }
 
@@ -410,11 +633,138 @@
     });
   }
 
+  function getRouteSegmentStartIndex() {
+    const currentStep = selectedRouteSteps[navigationStepIndex];
+    if (currentStep && Array.isArray(currentStep.way_points) && currentStep.way_points.length > 0) {
+      const startIndex = Number(currentStep.way_points[0]);
+      if (Number.isFinite(startIndex)) {
+        return Math.max(0, startIndex);
+      }
+    }
+
+    return 0;
+  }
+
+  function getRouteCoords(route) {
+    return (route?.geometry?.coordinates || []).map(coord => [coord[1], coord[0]]);
+  }
+
+  function renderActiveNavigationRoute() {
+    routeLayers.forEach(layer => map.removeLayer(layer));
+    routeLayers = [];
+
+    if (selectedRouteIndex === null || !currentRoutes[selectedRouteIndex]) {
+      return;
+    }
+
+    const route = currentRoutes[selectedRouteIndex];
+    const coords = getRouteCoords(route);
+    const startIndex = Math.min(getRouteSegmentStartIndex(), Math.max(coords.length - 2, 0));
+    const remainingCoords = coords.slice(startIndex);
+
+    if (remainingCoords.length >= 2) {
+      const line = L.polyline(remainingCoords, {
+        color: "#0ea5e9",
+        weight: 8,
+        opacity: 0.95,
+        lineCap: "round",
+        lineJoin: "round"
+      }).addTo(map);
+
+      routeLayers.push(line);
+    }
+  }
+
+  function rerenderRoutes() {
+    if (navigationActive) {
+      renderActiveNavigationRoute();
+      return;
+    }
+
+    drawRoutes();
+  }
+
+  async function rerouteToDestination(reasonText = "Te desviaste. Recalculando la ruta.") {
+    if (rerouteInProgress || !currentDestination || !userLocation) return;
+
+    rerouteInProgress = true;
+    speakText(reasonText, true);
+
+    try {
+      const body = {
+        coordinates: [
+          [userLocation.lng, userLocation.lat],
+          [currentDestination.lng, currentDestination.lat]
+        ],
+        instructions: true,
+        language: "es",
+        alternative_routes: {
+          target_count: 1,
+          weight_factor: 1.4,
+          share_factor: 0.5
+        }
+      };
+
+      const response = await fetch("https://api.openrouteservice.org/v2/directions/foot-walking/geojson", {
+        method: "POST",
+        headers: {
+          "Authorization": ORS_API_KEY,
+          "Content-Type": "application/json",
+          "Accept": "application/json, application/geo+json"
+        },
+        body: JSON.stringify(body)
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error?.message || data.message || "No se pudo recalcular la ruta.");
+      }
+
+      if (!data.features || !data.features.length) {
+        throw new Error("El servicio no devolvió una ruta nueva.");
+      }
+
+      currentRoutes = data.features;
+      selectedRouteIndex = 0;
+      selectedRouteSteps = buildNavigationSteps(currentRoutes[0]);
+      navigationStepIndex = 0;
+      lastSpokenStepIndex = -1;
+      distanceToCurrentStep = null;
+      announcedStepAlerts.clear();
+      lastDistanceToDestination = null;
+
+      rerenderRoutes();
+      renderRoutesList();
+      showNavigationInstruction(0);
+
+      speakText("Ruta actualizada. Sigue las nuevas indicaciones.", true);
+    } catch (error) {
+      console.error(error);
+      speakText(`No se pudo recalcular la ruta. ${error.message}`, true);
+    } finally {
+      rerouteInProgress = false;
+    }
+  }
+
   function checkNavigationProgress(lat, lng) {
     if (!navigationActive || navigationPaused || !selectedRouteSteps.length) return;
 
     const currentStep = selectedRouteSteps[navigationStepIndex];
+    const distanceToDestination = currentDestination
+      ? getDistanceMeters(lat, lng, currentDestination.lat, currentDestination.lng)
+      : null;
+
+    if (distanceToDestination !== null) {
+      lastDistanceToDestination = distanceToDestination;
+    }
+
     if (!currentStep) {
+      if (distanceToDestination !== null && distanceToDestination > 28) {
+        rerouteToDestination("Te pasaste del destino. Recalculando la ruta.");
+        return;
+      }
+
       speakText("Has llegado a tu destino.", true);
       stopNavigation(true);
       return;
@@ -429,6 +779,18 @@
     updateNavigationUiState();
 
     maybeSpeakStepProximityAlerts(navigationStepIndex, currentStep, distanceToStep);
+
+    if (distanceToDestination !== null && navigationStepIndex >= selectedRouteSteps.length - 1) {
+      const shouldReroute = distanceToDestination > 35 && (
+        lastDistanceToDestination === null ||
+        distanceToDestination > lastDistanceToDestination + 8
+      );
+
+      if (shouldReroute) {
+        rerouteToDestination("Te pasaste del destino. Recalculando la ruta.");
+        return;
+      }
+    }
 
     if (distanceToStep <= 18 && lastSpokenStepIndex !== navigationStepIndex) {
       showNavigationInstruction(navigationStepIndex);
@@ -475,7 +837,7 @@
     announcedStepAlerts.clear();
     navigationActive = true;
     navigationPaused = false;
-    autoCenterMap = true;
+    autoCenterMap = false;
 
     if (watchId !== null) {
       navigator.geolocation.clearWatch(watchId);
@@ -539,7 +901,7 @@
     }
 
     navigationPaused = false;
-    autoCenterMap = true;
+    autoCenterMap = false;
     if (userLocation) {
       map.setView([userLocation.lat, userLocation.lng], Math.max(map.getZoom(), 18), { animate: true });
     }
@@ -578,6 +940,7 @@
     lastSpokenStepIndex = -1;
     distanceToCurrentStep = null;
     announcedStepAlerts.clear();
+    lastDistanceToDestination = null;
     autoCenterMap = true;
 
     synth.cancel();
@@ -591,21 +954,28 @@
   }
 
   function renderSuggestions(results) {
-    suggestionsData = results || [];
+    const query = normalizeSearchText(searchInput.value.trim());
+    suggestionsData = sortSuggestionsByQuery(results || [], query);
     activeSuggestionIndex = -1;
 
     if (!suggestionsData.length) {
-      suggestionsBox.innerHTML = `<div class="suggestion-item">No se encontraron destinos.</div>`;
+      suggestionsBox.innerHTML = `<div class="suggestion-item"><div class="suggestion-title">No se encontraron destinos</div><div class="suggestion-sub">Prueba con otra calle, negocio o lugar cercano.</div></div>`;
       return;
     }
 
     suggestionsBox.innerHTML = suggestionsData.map((item, index) => {
-      const title = item.properties?.label?.split(",")[0] || item.properties?.name || "Destino";
-      const sub = item.properties?.label || "";
+      const title = item.title || "Destino";
+      const sub = item.subtitle || item.fullLabel || "";
+      const distanceText = getSuggestionDistanceText(item);
+      const sourceLabel = item.source === "osm" ? "OSM" : "ORS";
       return `
         <div class="suggestion-item" data-index="${index}">
           <div class="suggestion-title">${escapeHtml(title)}</div>
           <div class="suggestion-sub">${escapeHtml(sub)}</div>
+          <div class="suggestion-meta">
+            ${index === 0 && query ? `<span class="suggestion-badge">Mejor coincidencia</span>` : `<span class="suggestion-badge">${sourceLabel}</span>`}
+            ${distanceText ? `<span class="suggestion-distance">A ${escapeHtml(distanceText)}</span>` : ""}
+          </div>
         </div>
       `;
     }).join("");
@@ -625,12 +995,13 @@
     });
   }
 
-  async function searchPlaces(query) {
+  async function fetchOrsSuggestions(query) {
     const base = "https://api.openrouteservice.org/geocode/autocomplete";
     const params = new URLSearchParams({
       api_key: ORS_API_KEY,
       text: query,
-      size: "6"
+      size: "10",
+      "boundary.country": "PER"
     });
 
     if (userLocation) {
@@ -643,11 +1014,58 @@
     });
 
     if (!response.ok) {
-      throw new Error("No se pudieron cargar las sugerencias.");
+      throw new Error("No se pudieron cargar sugerencias de ORS.");
     }
 
     const data = await response.json();
-    return data.features || [];
+    return (data.features || []).map(normalizeOrsSuggestion).filter(Boolean);
+  }
+
+  async function fetchNominatimSuggestions(query) {
+    const base = "https://nominatim.openstreetmap.org/search";
+    const params = new URLSearchParams({
+      q: query,
+      format: "jsonv2",
+      addressdetails: "1",
+      limit: "8",
+      "accept-language": "es"
+    });
+
+    if (userLocation) {
+      const delta = 0.18;
+      params.set("viewbox", `${userLocation.lng - delta},${userLocation.lat + delta},${userLocation.lng + delta},${userLocation.lat - delta}`);
+      params.set("bounded", "0");
+    }
+
+    const response = await fetch(`${base}?${params.toString()}`, {
+      headers: {
+        "Accept": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error("No se pudieron cargar sugerencias de OSM.");
+    }
+
+    const data = await response.json();
+    return (data || []).map(normalizeNominatimSuggestion).filter(Boolean);
+  }
+
+  async function searchPlaces(query) {
+    const [orsResult, nominatimResult] = await Promise.allSettled([
+      fetchOrsSuggestions(query),
+      fetchNominatimSuggestions(query)
+    ]);
+
+    const orsSuggestions = orsResult.status === "fulfilled" ? orsResult.value : [];
+    const nominatimSuggestions = nominatimResult.status === "fulfilled" ? nominatimResult.value : [];
+
+    const combined = [...orsSuggestions, ...nominatimSuggestions];
+    if (!combined.length) {
+      throw new Error("No se pudieron cargar sugerencias en este momento.");
+    }
+
+    return combined;
   }
 
   async function loadAlternativeRoutes(destination) {
@@ -658,6 +1076,8 @@
     }
 
     clearRoutes();
+    currentDestination = destination;
+    lastDistanceToDestination = null;
 
     destinationMarker = L.marker([destination.lat, destination.lng])
       .addTo(map)
@@ -846,12 +1266,16 @@
     const item = suggestionsData[index];
     if (!item) return;
 
-    const coords = item.geometry?.coordinates || [];
     const destination = {
-      lng: coords[0],
-      lat: coords[1],
-      name: item.properties?.label || item.properties?.name || "Destino"
+      lng: Number(item.lng),
+      lat: Number(item.lat),
+      name: item.fullLabel || item.title || "Destino"
     };
+
+    if (!Number.isFinite(destination.lat) || !Number.isFinite(destination.lng)) {
+      speakText("No se pudo interpretar ese destino. Elige otra sugerencia.", true);
+      return;
+    }
 
     searchInput.value = destination.name;
     clearSuggestions();
@@ -864,7 +1288,6 @@
       speakText("Todavía no se obtuvo tu ubicación.", true);
       return;
     }
-    autoCenterMap = true;
     map.setView([userLocation.lat, userLocation.lng], 17);
     if (userMarker) userMarker.openPopup();
     speakText("Mapa centrado en tu ubicación.", true);
@@ -952,7 +1375,7 @@
 
     if (searchDebounce) clearTimeout(searchDebounce);
 
-    if (query.length < 3) {
+    if (query.length < 2) {
       clearSuggestions();
       return;
     }
@@ -962,7 +1385,8 @@
         const results = await searchPlaces(query);
         renderSuggestions(results);
         if (results.length) {
-          speakText(`${results.length} sugerencias encontradas. Usa flechas o toca una opción.`, true);
+          const first = suggestionsData[0]?.fullLabel || suggestionsData[0]?.title || "la primera sugerencia";
+          speakText(`${results.length} sugerencias encontradas. La mejor coincidencia es ${first}. Usa flechas o toca una opción.`, true);
         }
       } catch (error) {
         console.error(error);
@@ -985,7 +1409,7 @@
 
       const item = suggestionsData[activeSuggestionIndex];
       if (item) {
-        speakText(item.properties?.label || "Sugerencia", true);
+        speakText(item.fullLabel || item.title || "Sugerencia", true);
       }
     }
 
@@ -997,7 +1421,7 @@
 
       const item = suggestionsData[activeSuggestionIndex];
       if (item) {
-        speakText(item.properties?.label || "Sugerencia", true);
+        speakText(item.fullLabel || item.title || "Sugerencia", true);
       }
     }
 
@@ -1005,6 +1429,9 @@
       if (activeSuggestionIndex >= 0) {
         e.preventDefault();
         chooseSuggestion(activeSuggestionIndex);
+      } else if (suggestionsData.length) {
+        e.preventDefault();
+        chooseSuggestion(0);
       }
     }
 

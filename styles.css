@@ -224,6 +224,33 @@ body::before{
   line-height:1.4;
 }
 
+.suggestion-meta{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin-top:6px;
+}
+
+.suggestion-badge{
+  display:inline-flex;
+  align-items:center;
+  min-height:22px;
+  padding:2px 8px;
+  border-radius:999px;
+  background:#dbeafe;
+  color:#1d4ed8;
+  font-size:11px;
+  font-weight:900;
+}
+
+.suggestion-distance{
+  margin-left:auto;
+  font-size:11px;
+  font-weight:800;
+  color:#0f7a39;
+}
+
 /* PANEL DE RUTAS - MODO APP / BOTTOM SHEET */
 .routes-panel{
   position:fixed;
@@ -618,6 +645,48 @@ body::before{
   background:#fff;
   padding:0 4px;
   border-radius:999px;
+}
+
+.user-location-marker{
+  background:transparent !important;
+  border:none !important;
+}
+
+.user-location-core{
+  position:relative;
+  width:28px;
+  height:28px;
+  border-radius:50%;
+  background:radial-gradient(circle at 30% 30%, #7dd3fc 0%, #0ea5e9 45%, #0369a1 100%);
+  border:3px solid rgba(255,255,255,.95);
+  box-shadow:0 8px 18px rgba(3,105,161,.28);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.user-location-arrow{
+  width:0;
+  height:0;
+  border-left:6px solid transparent;
+  border-right:6px solid transparent;
+  border-bottom:10px solid #fff;
+  transform:translateY(-2px);
+}
+
+.user-location-pulse{
+  position:absolute;
+  width:28px;
+  height:28px;
+  border-radius:50%;
+  background:rgba(14,165,233,.22);
+  animation:userPulse 1.8s ease-out infinite;
+}
+
+@keyframes userPulse{
+  0%{ transform:scale(.75); opacity:.75; }
+  70%{ transform:scale(1.7); opacity:0; }
+  100%{ transform:scale(1.7); opacity:0; }
 }
 
 .quick-nav-controls{
