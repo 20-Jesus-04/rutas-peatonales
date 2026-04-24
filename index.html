@@ -4,14 +4,49 @@
   <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Rutas peatonales inteligentes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Sora:wght@600;700;800&display=swap" />
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 </head>
 <body>
 
 <div id="map"></div>
+<div id="screenReaderLive" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
-<div class="search-panel">
+<div id="authModal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+  <form id="authForm" class="auth-card" aria-label="Registro de perfil de usuario">
+    <h2 id="authTitle" class="auth-title">Perfil de accesibilidad</h2>
+    <p class="auth-sub">Cuéntanos tu condición para adaptar la app a tus necesidades.</p>
+
+    <label class="auth-label" for="authName">Nombre</label>
+    <input id="authName" class="auth-input" type="text" required autocomplete="name" placeholder="Ejemplo: María" />
+
+    <label class="auth-label" for="authEmail">Correo (opcional)</label>
+    <input id="authEmail" class="auth-input" type="email" autocomplete="email" placeholder="maria@email.com" />
+
+    <label class="auth-label" for="authCondition">Condición principal</label>
+    <select id="authCondition" class="auth-input" required>
+      <option value="">Seleccionar...</option>
+      <option value="ceguera">Ceguera total</option>
+      <option value="baja_vision">Baja visión</option>
+      <option value="daltonismo">Daltonismo</option>
+      <option value="movilidad_reducida">Movilidad reducida</option>
+      <option value="adulto_mayor">Adulto mayor</option>
+      <option value="otra">Otra condición</option>
+    </select>
+
+    <div class="auth-checks">
+      <label class="auth-check"><input id="authVoicePriority" type="checkbox" checked /> Priorizar guía por voz</label>
+      <label class="auth-check"><input id="authLargeText" type="checkbox" /> Texto grande</label>
+    </div>
+
+    <button type="submit" class="auth-submit">Guardar y continuar</button>
+  </form>
+</div>
+
+<div class="search-panel" role="search" aria-label="Búsqueda de destino">
   <div class="search-top">
     <div class="search-row">
       <div class="search-input-wrap">
@@ -22,11 +57,13 @@
           type="text"
           placeholder="Buscar destino..."
           autocomplete="off"
+          aria-label="Buscar destino"
+          aria-describedby="voiceStatus obstacleHint"
         />
       </div>
       <button id="voiceCommandBtn" class="voice-command-btn" title="Comandos por voz" aria-label="Activar comandos por voz">🎤</button>
-      <button id="gpsBtn" class="gps-btn" title="Centrar en mi ubicación">📍</button>
-      <button id="reportObstacleBtn" class="report-btn" title="Reportar obstáculo">🚧</button>
+      <button id="gpsBtn" class="gps-btn" title="Centrar en mi ubicación" aria-label="Centrar mapa en mi ubicación">📍</button>
+      <button id="reportObstacleBtn" class="report-btn" title="Reportar obstáculo" aria-label="Activar reporte de obstáculo">🚧</button>
     </div>
     <div class="hint">Escribe al menos 3 letras. Usa ↑ ↓ y Enter para elegir.</div>
     <div id="voiceStatus" class="hint voice-hint" aria-live="polite">Voz lista. Di: "quiero ir a ..." o "quiero reportar obstáculo".</div>
@@ -40,10 +77,10 @@
       </select>
     </div>
   </div>
-  <div id="suggestions" class="suggestions"></div>
+  <div id="suggestions" class="suggestions" role="listbox" aria-label="Sugerencias de destinos"></div>
 </div>
 
-<div class="routes-panel">
+<div class="routes-panel" role="region" aria-label="Panel de rutas y navegación">
   <button id="toggleRoutesPanelBtn" class="panel-toggle-btn" title="Expandir panel" aria-label="Expandir o contraer panel de rutas">▲</button>
   <h3 class="panel-title">Rutas peatonales</h3>
   <div class="sub-note">
@@ -70,6 +107,13 @@
     <span id="navStatusText">Listo para iniciar trayecto</span>
   </div>
 
+  <div id="userSummary" class="user-summary" aria-live="polite">Perfil no configurado.</div>
+
+  <div class="frequent-routes-box" aria-label="Rutas seguidas">
+    <div class="frequent-routes-title">Rutas seguidas</div>
+    <div id="frequentRoutesList" class="frequent-routes-list">Aún no tienes rutas guardadas.</div>
+  </div>
+
   <div class="voice-controls">
     <button id="btnSpeak" class="voice-btn">▶ Iniciar trayecto</button>
     <button id="btnPause" class="voice-btn secondary">⏸ Pausar trayecto</button>
@@ -87,7 +131,21 @@
     </div>
   </div>
 
-  <div id="routesContent" class="status">Obteniendo tu ubicación…</div>
+  <div id="routesContent" class="status" aria-live="polite">Obteniendo tu ubicación…</div>
+</div>
+
+<button id="accessDockToggleBtn" class="access-dock-toggle" type="button" aria-controls="accessibilityDock" aria-expanded="false" title="Abrir herramientas de accesibilidad">☰ Accesibilidad</button>
+
+<div id="accessDockBackdrop" class="access-dock-backdrop" aria-hidden="true"></div>
+
+<div id="accessibilityDock" class="accessibility-dock" aria-label="Centro de accesibilidad">
+  <button id="accessModeBtn" class="access-btn" type="button" aria-pressed="false" title="Modo visual reforzado">👁 Modo accesible</button>
+  <button id="accessProfileBtn" class="access-btn" type="button" title="Cambiar perfil de accesibilidad">🧩 Perfil: equilibrado</button>
+  <button id="editUserBtn" class="access-btn" type="button" title="Editar perfil de usuario">👤 Editar perfil</button>
+  <button id="nearbyAlertsBtn" class="access-btn" type="button" aria-pressed="true" title="Alertas cercanas">📢 Alertas cercanas</button>
+  <button id="vibrationBtn" class="access-btn" type="button" aria-pressed="true" title="Vibración háptica">📳 Vibración</button>
+  <button id="voiceHelpBtn" class="access-btn" type="button" title="Ayuda de comandos por voz">🧭 Ayuda voz</button>
+  <div id="accessStatus" class="access-status" aria-live="polite">Accesibilidad lista.</div>
 </div>
 
 <div class="compass" title="Brújula">

@@ -1,6 +1,9 @@
   const ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImFhOTA1MmJkZGYyNjRiYjRhZDA2OTcxM2NiMmJlZjQwIiwiaCI6Im11cm11cjY0In0=";
   const OBSTACLE_STORE_KEY = "rutas_peatonales_obstacles_v1";
   const OBSTACLE_SYNC_MS = 30000;
+  const ACCESSIBILITY_SETTINGS_KEY = "rutas_peatonales_accessibility_v1";
+  const USER_PROFILE_KEY = "rutas_peatonales_user_profile_v1";
+  const RECENT_ROUTES_KEY = "rutas_peatonales_recent_routes_v1";
   const HIGH_RISK_OBSTACLE_COUNT = 5;
   const HIGH_RISK_PENALTY = 10;
   const FORCE_SWITCH_MIN_IMPROVEMENT = 0.12;
@@ -64,8 +67,23 @@
   let obstacleSyncTimer = null;
 
   const searchInput = document.getElementById("searchInput");
+  const authModal = document.getElementById("authModal");
+  const authForm = document.getElementById("authForm");
+  const authName = document.getElementById("authName");
+  const authEmail = document.getElementById("authEmail");
+  const authCondition = document.getElementById("authCondition");
+  const authVoicePriority = document.getElementById("authVoicePriority");
+  const authLargeText = document.getElementById("authLargeText");
+  const screenReaderLive = document.getElementById("screenReaderLive");
   const voiceCommandBtn = document.getElementById("voiceCommandBtn");
   const voiceStatus = document.getElementById("voiceStatus");
+  const accessModeBtn = document.getElementById("accessModeBtn");
+  const accessProfileBtn = document.getElementById("accessProfileBtn");
+  const nearbyAlertsBtn = document.getElementById("nearbyAlertsBtn");
+  const vibrationBtn = document.getElementById("vibrationBtn");
+  const voiceHelpBtn = document.getElementById("voiceHelpBtn");
+  const accessStatus = document.getElementById("accessStatus");
+  const editUserBtn = document.getElementById("editUserBtn");
   const gpsBtn = document.getElementById("gpsBtn");
   const reportObstacleBtn = document.getElementById("reportObstacleBtn");
   const mapStyleSelect = document.getElementById("mapStyleSelect");
@@ -73,6 +91,9 @@
   const routesContent = document.getElementById("routesContent");
   const routesPanel = document.querySelector(".routes-panel");
   const toggleRoutesPanelBtn = document.getElementById("toggleRoutesPanelBtn");
+  const accessDockBackdrop = document.getElementById("accessDockBackdrop");
+  const accessibilityDock = document.getElementById("accessibilityDock");
+  const accessDockToggleBtn = document.getElementById("accessDockToggleBtn");
   const compassNeedle = document.getElementById("compassNeedle");
   const navStatus = document.getElementById("navStatus");
   const navStatusText = document.getElementById("navStatusText");
@@ -87,6 +108,8 @@
 
   const currentStepBox = document.getElementById("currentStepBox");
   const currentStepText = document.getElementById("currentStepText");
+  const userSummary = document.getElementById("userSummary");
+  const frequentRoutesList = document.getElementById("frequentRoutesList");
 
   const synth = window.speechSynthesis;
   let selectedVoice = null;
@@ -96,16 +119,34 @@
   let navigationStepIndex = 0;
   let selectedRouteSteps = [];
   let autoCenterMap = true;
+  let liveHeading = null;
   let lastSpokenStepIndex = -1;
   let distanceToCurrentStep = null;
   let announcedStepAlerts = new Set();
   let routesPanelExpanded = false;
+  let accessDockOpen = false;
   let voiceRecognition = null;
   let voiceRecognitionSupported = false;
   let voiceListening = false;
   let pendingVoiceMode = null;
   let voiceCommandMode = "command";
   let obstacleVoiceDraft = null;
+  let accessibilitySettings = {
+    visualMode: false,
+    nearbyAlerts: true,
+    vibration: true,
+    profile: "equilibrado"
+  };
+  let lastSpokenText = "";
+  let lastSpokenAt = 0;
+  let screenReaderTimer = null;
+  let nearbyAlertState = {
+    obstacleId: null,
+    bucket: null,
+    timestamp: 0
+  };
+  let userProfile = null;
+  let recentRoutes = [];
 
   function createUserIcon(heading = 0) {
     const rotation = Number.isFinite(heading) ? heading : 0;
@@ -396,6 +437,50 @@
       return;
     }
 
+    if (normalized.includes("ayuda") || normalized.includes("comandos")) {
+      speakVoiceCommandHelp();
+      return;
+    }
+
+    if (normalized.includes("perfil ceguera") || normalized.includes("modo ciego") || normalized.includes("modo ceguera")) {
+      accessibilitySettings.profile = "ceguera";
+      applyAccessibilityProfile();
+      return;
+    }
+
+    if (normalized.includes("perfil baja vision") || normalized.includes("perfil baja visión") || normalized.includes("modo baja vision") || normalized.includes("modo baja visión")) {
+      accessibilitySettings.profile = "baja_vision";
+      applyAccessibilityProfile();
+      return;
+    }
+
+    if (normalized.includes("perfil equilibrado") || normalized.includes("modo equilibrado")) {
+      accessibilitySettings.profile = "equilibrado";
+      applyAccessibilityProfile();
+      return;
+    }
+
+    if (normalized.includes("modo accesible") || normalized.includes("modo accesibilidad")) {
+      toggleAccessibilityMode();
+      return;
+    }
+
+    if (normalized.includes("alertas cercanas") || normalized.includes("alertas de obstaculos") || normalized.includes("alertas de obstaculos")) {
+      toggleNearbyAlerts();
+      return;
+    }
+
+    if (normalized.includes("vibracion") || normalized.includes("vibración")) {
+      toggleVibration();
+      return;
+    }
+
+    if (normalized.includes("editar perfil") || normalized.includes("mi perfil")) {
+      fillAuthFormFromProfile();
+      openAuthModal();
+      return;
+    }
+
     if (normalized.includes("centrar") || normalized.includes("mi ubicacion") || normalized.includes("mi ubicación")) {
       centerOnUser();
       return;
@@ -504,6 +589,409 @@
     }
   }
 
+  function announceForScreenReader(text, politeness = "polite") {
+    const message = String(text || "").trim();
+    if (!message || !screenReaderLive) return;
+
+    if (screenReaderTimer) {
+      clearTimeout(screenReaderTimer);
+      screenReaderTimer = null;
+    }
+
+    screenReaderLive.setAttribute("aria-live", politeness);
+    screenReaderLive.textContent = "";
+
+    screenReaderTimer = setTimeout(() => {
+      screenReaderLive.textContent = message;
+    }, 20);
+  }
+
+  function getConditionLabel(condition) {
+    const labels = {
+      ceguera: "Ceguera total",
+      baja_vision: "Baja visión",
+      daltonismo: "Daltonismo",
+      movilidad_reducida: "Movilidad reducida",
+      adulto_mayor: "Adulto mayor",
+      otra: "Otra condición"
+    };
+    return labels[condition] || "No especificada";
+  }
+
+  function openAuthModal() {
+    if (!authModal) return;
+    authModal.classList.add("open");
+    document.body.classList.add("auth-open");
+  }
+
+  function closeAuthModal() {
+    if (!authModal) return;
+    authModal.classList.remove("open");
+    document.body.classList.remove("auth-open");
+  }
+
+  function persistUserProfile() {
+    try {
+      localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(userProfile));
+    } catch (error) {
+      console.warn("No se pudo guardar el perfil de usuario:", error.message);
+    }
+  }
+
+  function loadUserProfile() {
+    try {
+      const raw = localStorage.getItem(USER_PROFILE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || !parsed.name || !parsed.condition) return;
+
+      userProfile = {
+        name: String(parsed.name),
+        email: String(parsed.email || ""),
+        condition: String(parsed.condition),
+        voicePriority: parsed.voicePriority !== false,
+        largeText: Boolean(parsed.largeText)
+      };
+    } catch (error) {
+      console.warn("No se pudo leer el perfil de usuario:", error.message);
+    }
+  }
+
+  function fillAuthFormFromProfile() {
+    if (!authForm) return;
+    authName.value = userProfile?.name || "";
+    authEmail.value = userProfile?.email || "";
+    authCondition.value = userProfile?.condition || "";
+    authVoicePriority.checked = userProfile?.voicePriority !== false;
+    authLargeText.checked = Boolean(userProfile?.largeText);
+  }
+
+  function updateUserSummary() {
+    if (!userSummary) return;
+
+    if (!userProfile) {
+      userSummary.textContent = "Perfil no configurado.";
+      return;
+    }
+
+    const conditionLabel = getConditionLabel(userProfile.condition);
+    userSummary.textContent = `${userProfile.name} • ${conditionLabel}`;
+  }
+
+  function applyUserConditionProfile() {
+    if (!userProfile) return;
+
+    if (userProfile.condition === "ceguera") {
+      accessibilitySettings.profile = "ceguera";
+      accessibilitySettings.visualMode = true;
+      accessibilitySettings.nearbyAlerts = true;
+      accessibilitySettings.vibration = true;
+    } else if (userProfile.condition === "baja_vision") {
+      accessibilitySettings.profile = "baja_vision";
+      accessibilitySettings.visualMode = true;
+      accessibilitySettings.nearbyAlerts = true;
+    } else {
+      accessibilitySettings.profile = "equilibrado";
+    }
+
+    if (userProfile.voicePriority === false) {
+      accessibilitySettings.nearbyAlerts = false;
+    }
+
+    document.body.classList.toggle("user-large-text", Boolean(userProfile.largeText));
+  }
+
+  function persistRecentRoutes() {
+    try {
+      localStorage.setItem(RECENT_ROUTES_KEY, JSON.stringify(recentRoutes));
+    } catch (error) {
+      console.warn("No se pudieron guardar rutas seguidas:", error.message);
+    }
+  }
+
+  function loadRecentRoutes() {
+    try {
+      const raw = localStorage.getItem(RECENT_ROUTES_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      recentRoutes = parsed
+        .map(item => ({
+          name: String(item?.name || "Destino"),
+          lat: Number(item?.lat),
+          lng: Number(item?.lng)
+        }))
+        .filter(item => Number.isFinite(item.lat) && Number.isFinite(item.lng))
+        .slice(0, 6);
+    } catch (error) {
+      console.warn("No se pudieron leer rutas seguidas:", error.message);
+    }
+  }
+
+  function saveRecentRoute(destination) {
+    if (!destination || !Number.isFinite(destination.lat) || !Number.isFinite(destination.lng)) return;
+
+    const normalizedName = normalizeSearchText(destination.name || "Destino");
+    recentRoutes = [
+      {
+        name: destination.name || "Destino",
+        lat: destination.lat,
+        lng: destination.lng
+      },
+      ...recentRoutes.filter(item => normalizeSearchText(item.name) !== normalizedName)
+    ].slice(0, 6);
+
+    persistRecentRoutes();
+    renderRecentRoutes();
+  }
+
+  function renderRecentRoutes() {
+    if (!frequentRoutesList) return;
+
+    if (!recentRoutes.length) {
+      frequentRoutesList.textContent = "Aún no tienes rutas guardadas.";
+      return;
+    }
+
+    frequentRoutesList.innerHTML = recentRoutes.map((route, index) => `
+      <button class="frequent-route-btn" type="button" data-route-index="${index}" aria-label="Cargar ruta seguida a ${escapeHtml(route.name)}">
+        ${escapeHtml(route.name)}
+      </button>
+    `).join("");
+
+    [...frequentRoutesList.querySelectorAll(".frequent-route-btn")].forEach(button => {
+      button.addEventListener("click", () => {
+        const index = Number(button.dataset.routeIndex);
+        const route = recentRoutes[index];
+        if (!route) return;
+        loadAlternativeRoutes(route);
+        speakText(`Cargando ruta seguida hacia ${route.name}.`, true);
+      });
+    });
+  }
+
+  function getAccessibilityProfileLabel() {
+    const labels = {
+      equilibrado: "equilibrado",
+      ceguera: "ceguera",
+      baja_vision: "baja visión"
+    };
+    return labels[accessibilitySettings.profile] || "equilibrado";
+  }
+
+  function getSpeechRate() {
+    if (accessibilitySettings.profile === "ceguera") return 0.86;
+    if (accessibilitySettings.profile === "baja_vision") return 0.92;
+    return accessibilitySettings.visualMode ? 0.9 : 0.95;
+  }
+
+  function applyAccessibilityProfile(silent = false) {
+    if (accessibilitySettings.profile === "ceguera") {
+      accessibilitySettings.visualMode = true;
+      accessibilitySettings.nearbyAlerts = true;
+      accessibilitySettings.vibration = true;
+      autoCenterMap = true;
+    } else if (accessibilitySettings.profile === "baja_vision") {
+      accessibilitySettings.visualMode = true;
+      accessibilitySettings.nearbyAlerts = true;
+    }
+
+    applyAccessibilityMode(true);
+    updateAccessibilityButtonsUi();
+    persistAccessibilitySettings();
+
+    const label = getAccessibilityProfileLabel();
+    setAccessStatus(`Perfil activo: ${label}.`);
+    announceForScreenReader(`Perfil de accesibilidad ${label} activado.`, "assertive");
+
+    if (!silent) {
+      speakText(`Perfil ${label} activado.`, true);
+    }
+  }
+
+  function cycleAccessibilityProfile() {
+    const order = ["equilibrado", "ceguera", "baja_vision"];
+    const currentIndex = order.indexOf(accessibilitySettings.profile);
+    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % order.length;
+    accessibilitySettings.profile = order[nextIndex];
+    applyAccessibilityProfile();
+  }
+
+  function setAccessStatus(message) {
+    if (accessStatus) {
+      accessStatus.textContent = message;
+    }
+  }
+
+  function updateAccessibilityButtonsUi() {
+    if (accessModeBtn) {
+      accessModeBtn.classList.toggle("active", accessibilitySettings.visualMode);
+      accessModeBtn.setAttribute("aria-pressed", accessibilitySettings.visualMode ? "true" : "false");
+      accessModeBtn.textContent = accessibilitySettings.visualMode ? "👁 Modo accesible ON" : "👁 Modo accesible";
+    }
+
+    if (accessProfileBtn) {
+      accessProfileBtn.classList.add("active");
+      accessProfileBtn.textContent = `🧩 Perfil: ${getAccessibilityProfileLabel()}`;
+      accessProfileBtn.setAttribute("aria-label", `Cambiar perfil de accesibilidad. Actual: ${getAccessibilityProfileLabel()}`);
+    }
+
+    if (nearbyAlertsBtn) {
+      nearbyAlertsBtn.classList.toggle("active", accessibilitySettings.nearbyAlerts);
+      nearbyAlertsBtn.setAttribute("aria-pressed", accessibilitySettings.nearbyAlerts ? "true" : "false");
+      nearbyAlertsBtn.textContent = accessibilitySettings.nearbyAlerts ? "📢 Alertas ON" : "📢 Alertas OFF";
+    }
+
+    if (vibrationBtn) {
+      vibrationBtn.classList.toggle("active", accessibilitySettings.vibration);
+      vibrationBtn.setAttribute("aria-pressed", accessibilitySettings.vibration ? "true" : "false");
+      vibrationBtn.textContent = accessibilitySettings.vibration ? "📳 Vibración ON" : "📳 Vibración OFF";
+    }
+  }
+
+  function persistAccessibilitySettings() {
+    try {
+      localStorage.setItem(ACCESSIBILITY_SETTINGS_KEY, JSON.stringify(accessibilitySettings));
+    } catch (error) {
+      console.warn("No se pudieron guardar los ajustes de accesibilidad:", error.message);
+    }
+  }
+
+  function loadAccessibilitySettings() {
+    try {
+      const raw = localStorage.getItem(ACCESSIBILITY_SETTINGS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      accessibilitySettings.visualMode = Boolean(parsed?.visualMode);
+      accessibilitySettings.nearbyAlerts = parsed?.nearbyAlerts !== false;
+      accessibilitySettings.vibration = parsed?.vibration !== false;
+      accessibilitySettings.profile = typeof parsed?.profile === "string" ? parsed.profile : "equilibrado";
+    } catch (error) {
+      console.warn("No se pudieron leer los ajustes de accesibilidad:", error.message);
+    }
+  }
+
+  function applyAccessibilityMode(silent = false) {
+    document.body.classList.toggle("a11y-visual", accessibilitySettings.visualMode);
+
+    if (accessibilitySettings.visualMode && mapStyleSelect?.value !== "contrast") {
+      setMapStyle("contrast", true);
+    }
+
+    if (!silent) {
+      const stateText = accessibilitySettings.visualMode ? "activado" : "desactivado";
+      speakText(`Modo accesible ${stateText}.`, true);
+    }
+
+    updateAccessibilityButtonsUi();
+    persistAccessibilitySettings();
+    setAccessStatus(
+      accessibilitySettings.visualMode
+        ? "Modo visual reforzado activo."
+        : "Modo visual reforzado desactivado."
+    );
+  }
+
+  function toggleAccessibilityMode() {
+    accessibilitySettings.visualMode = !accessibilitySettings.visualMode;
+    applyAccessibilityMode();
+  }
+
+  function toggleNearbyAlerts() {
+    accessibilitySettings.nearbyAlerts = !accessibilitySettings.nearbyAlerts;
+    updateAccessibilityButtonsUi();
+    persistAccessibilitySettings();
+
+    const stateText = accessibilitySettings.nearbyAlerts ? "activadas" : "desactivadas";
+    speakText(`Alertas cercanas ${stateText}.`, true);
+    setAccessStatus(`Alertas cercanas ${stateText}.`);
+  }
+
+  function toggleVibration() {
+    accessibilitySettings.vibration = !accessibilitySettings.vibration;
+    persistAccessibilitySettings();
+
+    const stateText = accessibilitySettings.vibration ? "activada" : "desactivada";
+    speakText(`Vibración ${stateText}.`, true);
+    setAccessStatus(`Vibración ${stateText}.`);
+  }
+
+  function vibrateAlert(pattern = [120, 70, 120]) {
+    if (!accessibilitySettings.vibration) return;
+    if (!navigator?.vibrate) return;
+    navigator.vibrate(pattern);
+  }
+
+  function speakVoiceCommandHelp() {
+    const message = [
+      "Comandos disponibles.",
+      "Puedes decir: quiero ir a más el destino.",
+      "También: iniciar trayecto, pausar, reanudar, repetir o detener.",
+      "Para reportes: quiero reportar obstáculo.",
+      "Para accesibilidad: perfil ceguera, perfil baja visión o perfil equilibrado.",
+      "También puedes decir: alertas cercanas, vibración, alto contraste, satélite o calles.",
+      "Para actualizar tus datos puedes decir: editar perfil."
+    ].join(" ");
+
+    speakText(message, true);
+    setAccessStatus("Ayuda de voz leída.");
+  }
+
+  function getNearestObstacleInfo(lat, lng) {
+    if (!obstacles.length) return null;
+
+    let nearest = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    obstacles.forEach(obstacle => {
+      const distance = getDistanceMeters(lat, lng, obstacle.lat, obstacle.lng);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = obstacle;
+      }
+    });
+
+    if (!nearest || !Number.isFinite(nearestDistance)) return null;
+    return { obstacle: nearest, distance: nearestDistance };
+  }
+
+  function maybeAnnounceNearbyObstacle(lat, lng) {
+    if (!accessibilitySettings.nearbyAlerts) return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const nearestInfo = getNearestObstacleInfo(lat, lng);
+    if (!nearestInfo) return;
+
+    const { obstacle, distance } = nearestInfo;
+    if (distance > 45) return;
+
+    const bucket = distance <= 12 ? "critico" : distance <= 25 ? "medio" : "cercano";
+    const now = Date.now();
+    const cooldownMs = 22000;
+
+    if (
+      nearbyAlertState.obstacleId === obstacle.id &&
+      nearbyAlertState.bucket === bucket &&
+      now - nearbyAlertState.timestamp < cooldownMs
+    ) {
+      return;
+    }
+
+    nearbyAlertState = {
+      obstacleId: obstacle.id,
+      bucket,
+      timestamp: now
+    };
+
+    const typeLabel = getObstacleTypeLabel(obstacle.type).toLowerCase();
+    const distanceText = `${Math.max(1, Math.round(distance))} metros`;
+    const prefix = bucket === "critico" ? "Atención crítica" : "Precaución";
+
+    speakText(`${prefix}. Obstáculo de tipo ${typeLabel} a ${distanceText}.`, true);
+    vibrateAlert(bucket === "critico" ? [200, 100, 200, 100, 200] : [140, 90, 140]);
+    setAccessStatus(`Aviso: ${typeLabel} a ${distanceText}.`);
+  }
+
   function setMapStyle(styleKey, silent = false) {
     const selectedStyle = baseMapConfigs[styleKey] ? styleKey : "streets";
     const config = baseMapConfigs[selectedStyle];
@@ -524,7 +1012,7 @@
   }
 
   function updateNavigationUiState() {
-    document.body.classList.remove("nav-idle", "nav-active", "nav-paused", "instruction-only");
+    document.body.classList.remove("nav-idle", "nav-active", "nav-paused", "instruction-only", "navigation-mode");
 
     const totalSteps = selectedRouteSteps.length;
     const currentStep = Math.min(navigationStepIndex + 1, Math.max(totalSteps, 1));
@@ -549,6 +1037,7 @@
     } else {
       document.body.classList.add("nav-active");
       document.body.classList.add("instruction-only");
+      document.body.classList.add("navigation-mode");
       setRoutesPanelExpanded(false);
       if (navStatus) {
         navStatus.className = "nav-status active";
@@ -605,6 +1094,50 @@
 
   function toggleRoutesPanel() {
     setRoutesPanelExpanded(!routesPanelExpanded);
+  }
+
+  function isCompactViewport() {
+    return window.matchMedia("(max-width: 767px)").matches;
+  }
+
+  function setAccessDockOpen(open) {
+    const compact = isCompactViewport();
+    accessDockOpen = Boolean(open) && isCompactViewport();
+    document.body.classList.toggle("access-dock-open", accessDockOpen);
+
+    if (accessDockBackdrop) {
+      accessDockBackdrop.classList.toggle("open", accessDockOpen);
+      accessDockBackdrop.setAttribute("aria-hidden", accessDockOpen ? "false" : "true");
+    }
+
+    if (accessDockToggleBtn) {
+      accessDockToggleBtn.setAttribute("aria-expanded", accessDockOpen ? "true" : "false");
+      accessDockToggleBtn.textContent = compact ? (accessDockOpen ? "✕" : "☰") : (accessDockOpen ? "✕ Cerrar" : "☰ Accesibilidad");
+      accessDockToggleBtn.title = accessDockOpen
+        ? "Cerrar herramientas de accesibilidad"
+        : "Abrir herramientas de accesibilidad";
+      accessDockToggleBtn.setAttribute("aria-label", accessDockOpen ? "Cerrar herramientas de accesibilidad" : "Abrir herramientas de accesibilidad");
+    }
+  }
+
+  function syncAccessDockByViewport() {
+    if (!isCompactViewport()) {
+      accessDockOpen = false;
+      document.body.classList.remove("access-dock-open");
+      if (accessDockBackdrop) {
+        accessDockBackdrop.classList.remove("open");
+        accessDockBackdrop.setAttribute("aria-hidden", "true");
+      }
+      if (accessDockToggleBtn) {
+        accessDockToggleBtn.setAttribute("aria-expanded", "false");
+        accessDockToggleBtn.textContent = "☰ Accesibilidad";
+        accessDockToggleBtn.title = "Abrir herramientas de accesibilidad";
+        accessDockToggleBtn.setAttribute("aria-label", "Abrir herramientas de accesibilidad");
+      }
+      return;
+    }
+
+    setAccessDockOpen(false);
   }
 
   function setRoutesMessage(html) {
@@ -1239,7 +1772,56 @@
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
-  function buildStepGuidanceText(step) {
+  function normalizeBearing(degrees) {
+    if (!Number.isFinite(degrees)) return null;
+    const value = degrees % 360;
+    return value < 0 ? value + 360 : value;
+  }
+
+  function getBearingDegrees(fromLat, fromLng, toLat, toLng) {
+    if (![fromLat, fromLng, toLat, toLng].every(Number.isFinite)) return null;
+
+    const startLat = fromLat * Math.PI / 180;
+    const endLat = toLat * Math.PI / 180;
+    const deltaLng = (toLng - fromLng) * Math.PI / 180;
+    const y = Math.sin(deltaLng) * Math.cos(endLat);
+    const x = Math.cos(startLat) * Math.sin(endLat) - Math.sin(startLat) * Math.cos(endLat) * Math.cos(deltaLng);
+
+    return normalizeBearing((Math.atan2(y, x) * 180 / Math.PI + 360) % 360);
+  }
+
+  function getCardinalDirectionLabel(bearing) {
+    const value = normalizeBearing(bearing);
+    if (value === null) return "";
+
+    if (value >= 337.5 || value < 22.5) return "norte";
+    if (value < 67.5) return "noreste";
+    if (value < 112.5) return "este";
+    if (value < 157.5) return "sureste";
+    if (value < 202.5) return "sur";
+    if (value < 247.5) return "suroeste";
+    if (value < 292.5) return "oeste";
+    return "noroeste";
+  }
+
+  function getRelativeDirectionLabel(targetBearing, heading) {
+    const normalizedTarget = normalizeBearing(targetBearing);
+    const normalizedHeading = normalizeBearing(heading);
+    if (normalizedTarget === null || normalizedHeading === null) return "";
+
+    const delta = normalizeBearing(normalizedTarget - normalizedHeading);
+    if (delta === null) return "";
+    if (delta <= 20 || delta >= 340) return "adelante";
+    if (delta < 60) return "ligeramente a la derecha";
+    if (delta < 120) return "a la derecha";
+    if (delta < 170) return "casi media vuelta a la derecha";
+    if (delta < 190) return "da media vuelta";
+    if (delta < 240) return "casi media vuelta a la izquierda";
+    if (delta < 300) return "a la izquierda";
+    return "ligeramente a la izquierda";
+  }
+
+  function buildStepGuidanceText(step, context = {}) {
     const instruction = simplifyInstructionText(step?.instruction || "Continúa recto");
     const stepDistance = Number(step?.distance || 0);
 
@@ -1247,14 +1829,37 @@
       return "Has llegado a tu destino.";
     }
 
-    if (stepDistance > 0) {
-      if (stepDistance <= 15) {
-        return `En ${formatMetersText(stepDistance)}, ${instruction}`;
-      }
-      return `Camina ${formatMetersText(stepDistance)}. Luego, ${instruction}`;
+    const currentLat = Number.isFinite(context.currentLat) ? context.currentLat : userLocation?.lat;
+    const currentLng = Number.isFinite(context.currentLng) ? context.currentLng : userLocation?.lng;
+    const heading = Number.isFinite(context.heading) ? context.heading : liveHeading;
+    const targetBearing = Number.isFinite(step?.lat) && Number.isFinite(step?.lng)
+      ? getBearingDegrees(currentLat, currentLng, step.lat, step.lng)
+      : null;
+    const cardinalDirection = getCardinalDirectionLabel(targetBearing);
+    const relativeDirection = getRelativeDirectionLabel(targetBearing, heading);
+    let directionText = "";
+    if (relativeDirection && cardinalDirection) {
+      directionText = relativeDirection === "adelante"
+        ? `adelante, rumbo ${cardinalDirection}`
+        : `${relativeDirection}, rumbo ${cardinalDirection}`;
+    } else if (relativeDirection) {
+      directionText = relativeDirection;
+    } else if (cardinalDirection) {
+      directionText = `rumbo ${cardinalDirection}`;
     }
 
-    return instruction;
+    if (stepDistance > 0) {
+      if (stepDistance <= 15) {
+        return directionText
+          ? `En ${formatMetersText(stepDistance)}, ${directionText}. ${instruction}`
+          : `En ${formatMetersText(stepDistance)}, ${instruction}`;
+      }
+      return directionText
+        ? `Camina ${formatMetersText(stepDistance)} ${directionText}. ${instruction}`
+        : `Camina ${formatMetersText(stepDistance)}. Luego, ${instruction}`;
+    }
+
+    return directionText ? `${directionText}. ${instruction}` : instruction;
   }
 
   function clearSuggestions() {
@@ -1290,11 +1895,13 @@
   }
 
   function getRouteWeight(index) {
-    return index === selectedRouteIndex ? 8 : index === recommendedRouteIndex ? 6 : 4;
+    const boost = accessibilitySettings.visualMode ? 2 : 0;
+    return index === selectedRouteIndex ? 8 + boost : index === recommendedRouteIndex ? 6 + boost : 4 + boost;
   }
 
   function getRouteOpacity(index) {
-    return index === selectedRouteIndex ? 1 : index === recommendedRouteIndex ? 0.7 : 0.4;
+    const baseSecondary = accessibilitySettings.visualMode ? 0.58 : 0.4;
+    return index === selectedRouteIndex ? 1 : index === recommendedRouteIndex ? 0.78 : baseSecondary;
   }
 
   function escapeHtml(text) {
@@ -1307,15 +1914,29 @@
   }
 
   function speakText(text, interrupt = false) {
-    if (!text || !synth) return;
+    if (!text) return;
+
+    const message = String(text).trim();
+    if (!message) return;
+
+    announceForScreenReader(message, interrupt ? "assertive" : "polite");
+
+    const now = Date.now();
+    if (message === lastSpokenText && now - lastSpokenAt < 2000) {
+      return;
+    }
+    lastSpokenText = message;
+    lastSpokenAt = now;
+
+    if (!synth) return;
 
     if (interrupt) {
       synth.cancel();
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
+    const utterance = new SpeechSynthesisUtterance(message);
     utterance.lang = "es-PE";
-    utterance.rate = 0.95;
+    utterance.rate = getSpeechRate();
     utterance.pitch = 1;
     utterance.volume = 1;
 
@@ -1522,15 +2143,18 @@
     }
 
     if (typeof heading === "number" && !Number.isNaN(heading)) {
+      liveHeading = heading;
       compassNeedle.style.transform = `rotate(${heading}deg)`;
     }
+
+    maybeAnnounceNearbyObstacle(lat, lng);
   }
 
   function showNavigationInstruction(stepIndex) {
     if (!selectedRouteSteps[stepIndex]) return;
 
     const step = selectedRouteSteps[stepIndex];
-    const stepText = buildStepGuidanceText(step);
+    const stepText = buildStepGuidanceText(step, { heading: liveHeading });
     showCurrentStep(stepText);
 
     if (lastSpokenStepIndex !== stepIndex) {
@@ -1780,13 +2404,20 @@
     announcedStepAlerts.clear();
     navigationActive = true;
     navigationPaused = false;
-    autoCenterMap = false;
+    autoCenterMap = true;
+
+    if (userLocation) {
+      map.setView([userLocation.lat, userLocation.lng], Math.max(map.getZoom(), 18), {
+        animate: true,
+        duration: 0.35
+      });
+    }
 
     if (watchId !== null) {
       navigator.geolocation.clearWatch(watchId);
     }
 
-    speakText("Trayecto iniciado. Sigue la ruta seleccionada.", true);
+    speakText("Modo navegación activado. Te diré cada paso con distancia y dirección.", true);
 
     if (selectedRouteSteps.length > 0) {
       showNavigationInstruction(0);
@@ -1844,7 +2475,7 @@
     }
 
     navigationPaused = false;
-    autoCenterMap = false;
+    autoCenterMap = true;
     if (userLocation) {
       map.setView([userLocation.lat, userLocation.lng], Math.max(map.getZoom(), 18), { animate: true });
     }
@@ -1864,7 +2495,7 @@
     const step = selectedRouteSteps[navigationStepIndex];
     if (!step) return;
 
-    const stepText = buildStepGuidanceText(step);
+    const stepText = buildStepGuidanceText(step, { heading: liveHeading });
     showCurrentStep(stepText);
     speakText(stepText, true);
   }
@@ -1912,7 +2543,7 @@
       const distanceText = getSuggestionDistanceText(item);
       const sourceLabel = item.source === "osm" ? "OSM" : "ORS";
       return `
-        <div class="suggestion-item" data-index="${index}">
+        <div class="suggestion-item" data-index="${index}" role="option" tabindex="0" aria-label="Sugerencia ${index + 1}: ${escapeHtml(title)}">
           <div class="suggestion-title">${escapeHtml(title)}</div>
           <div class="suggestion-sub">${escapeHtml(sub)}</div>
           <div class="suggestion-meta">
@@ -1927,6 +2558,14 @@
       el.addEventListener("click", () => {
         const index = Number(el.dataset.index);
         chooseSuggestion(index);
+      });
+
+      el.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          const index = Number(el.dataset.index);
+          chooseSuggestion(index);
+        }
       });
     });
   }
@@ -2163,7 +2802,7 @@
         : "Sin evaluación de seguridad";
 
       html += `
-        <div class="route-card ${isSelected ? "active" : ""}" data-route-index="${index}">
+        <div class="route-card ${isSelected ? "active" : ""}" data-route-index="${index}" role="button" tabindex="0" aria-label="Ruta ${index + 1}, ${formatDuration(summary.duration)}, ${formatDistance(summary.distance)}">
           <div class="route-card-top">
             <div class="route-title">Ruta ${index + 1}</div>
             <div class="badge">${isRecommended ? "Recomendada" : "Alternativa"}</div>
@@ -2187,6 +2826,14 @@
       card.addEventListener("click", () => {
         const index = Number(card.dataset.routeIndex);
         selectRoute(index);
+      });
+
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          const index = Number(card.dataset.routeIndex);
+          selectRoute(index);
+        }
       });
     });
   }
@@ -2233,6 +2880,7 @@
 
     searchInput.value = destination.name;
     clearSuggestions();
+    saveRecentRoute(destination);
     loadAlternativeRoutes(destination);
   }
 
@@ -2301,6 +2949,7 @@
     function setHeading(deg) {
       if (Number.isFinite(deg)) {
         currentHeading = deg;
+        liveHeading = deg;
         compassNeedle.style.transform = `rotate(${deg}deg)`;
       }
     }
@@ -2397,8 +3046,23 @@
 
   document.addEventListener("click", (e) => {
     const panel = document.querySelector(".search-panel");
-    if (!panel.contains(e.target)) {
+    if (panel && !panel.contains(e.target)) {
       clearSuggestions();
+    }
+
+    if (accessDockOpen && isCompactViewport()) {
+      const clickedBackdrop = accessDockBackdrop && accessDockBackdrop.contains(e.target);
+      const clickedInsideDock = accessibilityDock && accessibilityDock.contains(e.target);
+      const clickedToggle = accessDockToggleBtn && accessDockToggleBtn.contains(e.target);
+      if (clickedBackdrop || (!clickedInsideDock && !clickedToggle)) {
+        setAccessDockOpen(false);
+      }
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && accessDockOpen) {
+      setAccessDockOpen(false);
     }
   });
 
@@ -2408,7 +3072,72 @@
     });
   }
 
+  if (authForm) {
+    authForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+
+      const name = String(authName.value || "").trim();
+      const condition = String(authCondition.value || "").trim();
+
+      if (!name || !condition) {
+        speakText("Completa nombre y condición para continuar.", true);
+        return;
+      }
+
+      userProfile = {
+        name,
+        email: String(authEmail.value || "").trim(),
+        condition,
+        voicePriority: Boolean(authVoicePriority.checked),
+        largeText: Boolean(authLargeText.checked)
+      };
+
+      persistUserProfile();
+      applyUserConditionProfile();
+      applyAccessibilityProfile(true);
+      updateUserSummary();
+      updateAccessibilityButtonsUi();
+      closeAuthModal();
+
+      const conditionLabel = getConditionLabel(userProfile.condition);
+      speakText(`Perfil guardado. Hola ${userProfile.name}. Condición ${conditionLabel}.`, true);
+      setAccessStatus(`Perfil activo: ${userProfile.name}.`);
+    });
+  }
+
+  if (accessModeBtn) {
+    accessModeBtn.addEventListener("click", toggleAccessibilityMode);
+  }
+
+  if (accessProfileBtn) {
+    accessProfileBtn.addEventListener("click", cycleAccessibilityProfile);
+  }
+
+  if (nearbyAlertsBtn) {
+    nearbyAlertsBtn.addEventListener("click", toggleNearbyAlerts);
+  }
+
+  if (vibrationBtn) {
+    vibrationBtn.addEventListener("click", toggleVibration);
+  }
+
+  if (voiceHelpBtn) {
+    voiceHelpBtn.addEventListener("click", speakVoiceCommandHelp);
+  }
+
+  if (editUserBtn) {
+    editUserBtn.addEventListener("click", () => {
+      fillAuthFormFromProfile();
+      openAuthModal();
+    });
+  }
+
   gpsBtn.addEventListener("click", centerOnUser);
+  if (accessDockToggleBtn) {
+    accessDockToggleBtn.addEventListener("click", () => {
+      setAccessDockOpen(!accessDockOpen);
+    });
+  }
   if (toggleRoutesPanelBtn) {
     toggleRoutesPanelBtn.addEventListener("click", toggleRoutesPanel);
   }
@@ -2437,7 +3166,14 @@
     speechSynthesis.onvoiceschanged = loadSpanishVoice;
   }
 
+  loadAccessibilitySettings();
+  loadUserProfile();
+  loadRecentRoutes();
+  applyUserConditionProfile();
   setMapStyle("streets", true);
+  applyAccessibilityProfile(true);
+  updateUserSummary();
+  renderRecentRoutes();
   setRoutesPanelExpanded(false);
   loadObstacles();
   startObstacleSync();
@@ -2445,3 +3181,10 @@
   initCompass();
   initVoiceRecognition();
   updateNavigationUiState();
+  syncAccessDockByViewport();
+  window.addEventListener("resize", syncAccessDockByViewport);
+
+  if (!userProfile) {
+    openAuthModal();
+    announceForScreenReader("Debes completar tu perfil para adaptar la aplicación.", "assertive");
+  }
