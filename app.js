@@ -1,4 +1,14 @@
   const ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImFhOTA1MmJkZGYyNjRiYjRhZDA2OTcxM2NiMmJlZjQwIiwiaCI6Im11cm11cjY0In0=";
+  const OBSTACLE_STORE_KEY = "rutas_peatonales_obstacles_v1";
+  const OBSTACLE_SYNC_MS = 30000;
+  const HIGH_RISK_OBSTACLE_COUNT = 5;
+  const HIGH_RISK_PENALTY = 10;
+  const FORCE_SWITCH_MIN_IMPROVEMENT = 0.12;
+
+  // Configura estos valores para compartir reportes entre diferentes usuarios con Supabase.
+  const SUPABASE_URL = "";
+  const SUPABASE_ANON_KEY = "";
+  const supabaseEnabled = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
   const map = L.map("map", { zoomControl: true }).setView([-12.0464, -77.0428], 16);
   let activeBaseLayer = null;
@@ -45,12 +55,24 @@
   let currentDestination = null;
   let lastDistanceToDestination = null;
   let rerouteInProgress = false;
+  let recommendedRouteIndex = null;
+  let routeAssessments = [];
+
+  let obstacles = [];
+  let obstacleMarkers = [];
+  let reportModeActive = false;
+  let obstacleSyncTimer = null;
 
   const searchInput = document.getElementById("searchInput");
+  const voiceCommandBtn = document.getElementById("voiceCommandBtn");
+  const voiceStatus = document.getElementById("voiceStatus");
   const gpsBtn = document.getElementById("gpsBtn");
+  const reportObstacleBtn = document.getElementById("reportObstacleBtn");
   const mapStyleSelect = document.getElementById("mapStyleSelect");
   const suggestionsBox = document.getElementById("suggestions");
   const routesContent = document.getElementById("routesContent");
+  const routesPanel = document.querySelector(".routes-panel");
+  const toggleRoutesPanelBtn = document.getElementById("toggleRoutesPanelBtn");
   const compassNeedle = document.getElementById("compassNeedle");
   const navStatus = document.getElementById("navStatus");
   const navStatusText = document.getElementById("navStatusText");
@@ -77,6 +99,13 @@
   let lastSpokenStepIndex = -1;
   let distanceToCurrentStep = null;
   let announcedStepAlerts = new Set();
+  let routesPanelExpanded = false;
+  let voiceRecognition = null;
+  let voiceRecognitionSupported = false;
+  let voiceListening = false;
+  let pendingVoiceMode = null;
+  let voiceCommandMode = "command";
+  let obstacleVoiceDraft = null;
 
   function createUserIcon(heading = 0) {
     const rotation = Number.isFinite(heading) ? heading : 0;
@@ -91,6 +120,388 @@
       iconSize: [28, 28],
       iconAnchor: [14, 14]
     });
+  }
+
+  function createObstacleIcon(severity = 3) {
+    const safeSeverity = Math.max(1, Math.min(5, Number(severity) || 3));
+    const colors = ['#10b981', '#3b82f6', '#f59e0b', '#fb923c', '#dc2626'];
+    const emojis = ['🚧', '⚠️', '⛔', '🚨', '🆘'];
+    const color = colors[safeSeverity - 1] || '#64748b';
+    const emoji = emojis[safeSeverity - 1] || '⚠️';
+    
+    return L.divIcon({
+      className: "obstacle-marker",
+      html: `
+        <div class="obstacle-pin severity-${safeSeverity}" style="
+          background:${color};
+          box-shadow:0 4px 12px rgba(0,0,0,.25), 0 0 0 3px rgba(255,255,255,.9);
+          animation:obstaclePop .4s cubic-bezier(0.34, 1.56, 0.64, 1);
+        ">
+          <span style="font-size:18px;">${emoji}</span>
+        </div>
+      `,
+      iconSize: [44, 44],
+      iconAnchor: [22, 22],
+      popupAnchor: [0, -22]
+    });
+  }
+
+  function setVoiceStatus(message, isListening = false) {
+    if (voiceStatus) {
+      voiceStatus.textContent = message;
+      voiceStatus.classList.toggle("listening", Boolean(isListening));
+    }
+    if (voiceCommandBtn) {
+      voiceCommandBtn.classList.toggle("listening", Boolean(isListening));
+      voiceCommandBtn.setAttribute("aria-label", isListening ? "Escuchando comandos por voz" : "Activar comandos por voz");
+    }
+  }
+
+  function normalizeVoiceText(text) {
+    return normalizeSearchText(String(text || "").replace(/[.,;:!?]/g, " "));
+  }
+
+  function parseVoiceSeverity(text) {
+    const normalized = normalizeVoiceText(text);
+    if (!normalized) return null;
+
+    const direct = normalized.match(/\b([1-5])\b/);
+    if (direct) return Number(direct[1]);
+
+    const byWord = [
+      { keys: ["uno", "un", "bajo", "leve"], value: 1 },
+      { keys: ["dos"], value: 2 },
+      { keys: ["tres", "medio", "moderado"], value: 3 },
+      { keys: ["cuatro", "alto"], value: 4 },
+      { keys: ["cinco", "critico", "grave", "muy alto"], value: 5 }
+    ];
+
+    for (const rule of byWord) {
+      if (rule.keys.some(key => normalized.includes(key))) {
+        return rule.value;
+      }
+    }
+
+    return null;
+  }
+
+  function parseVoiceObstacleType(text) {
+    const normalized = normalizeVoiceText(text);
+    const map = [
+      { type: "obra", aliases: ["obra", "construccion", "trabajo"] },
+      { type: "escalera", aliases: ["escalera", "escaleras"] },
+      { type: "bache", aliases: ["bache", "hueco", "hoyo"] },
+      { type: "vereda_rota", aliases: ["vereda rota", "acera rota", "pista rota", "banqueta rota"] },
+      { type: "poste", aliases: ["poste", "objeto", "bloqueo"] },
+      { type: "inundacion", aliases: ["inundacion", "agua", "charco", "anegado"] },
+      { type: "inseguridad", aliases: ["inseguridad", "peligro", "asalto", "robo"] }
+    ];
+
+    const found = map.find(item => item.aliases.some(alias => normalized.includes(normalizeSearchText(alias))));
+    return found ? found.type : null;
+  }
+
+  function extractDestinationFromCommand(rawText) {
+    const text = String(rawText || "").trim();
+    if (!text) return "";
+    const normalized = normalizeVoiceText(text);
+
+    const patterns = [
+      "quiero ir a",
+      "quiero ir al",
+      "quiero llegar a",
+      "llevame a",
+      "llévame a",
+      "ir a",
+      "destino",
+      "buscar"
+    ];
+
+    const prefix = patterns.find(p => normalized.startsWith(normalizeSearchText(p)));
+    if (!prefix) return text;
+
+    const cleaned = text.slice(prefix.length).trim();
+    return cleaned || "";
+  }
+
+  async function searchDestinationByVoice(query) {
+    const cleanQuery = String(query || "").trim();
+    if (cleanQuery.length < 2) {
+      speakText("No escuché bien el destino. Inténtalo nuevamente.", true);
+      setVoiceStatus("No se entendió el destino. Toca el micrófono e intenta de nuevo.", false);
+      return;
+    }
+
+    try {
+      setVoiceStatus(`Buscando destino: ${cleanQuery}`, false);
+      searchInput.value = cleanQuery;
+      const results = await searchPlaces(cleanQuery);
+      renderSuggestions(results);
+      chooseSuggestion(0);
+
+      const first = suggestionsData[0]?.fullLabel || suggestionsData[0]?.title || cleanQuery;
+      speakText(`Entendido. Te llevo a ${first}.`, true);
+      setVoiceStatus(`Destino seleccionado por voz: ${first}.`, false);
+    } catch (error) {
+      console.error(error);
+      speakText("No pude encontrar ese destino por voz. Puedes intentarlo otra vez o escribirlo.", true);
+      setVoiceStatus("No se encontró destino por voz. Puedes repetir o escribirlo.", false);
+    }
+  }
+
+  function askVoiceObstacleType() {
+    voiceCommandMode = "obstacle_type";
+    pendingVoiceMode = "obstacle_type";
+    speakText("¿Qué quieres reportar? Puedes decir obra, escalera, bache, vereda rota, poste, inundación, inseguridad u otro.", true);
+    setVoiceStatus("Escuchando tipo de obstáculo...", true);
+  }
+
+  function askVoiceObstacleSeverity() {
+    voiceCommandMode = "obstacle_severity";
+    pendingVoiceMode = "obstacle_severity";
+    speakText("Indica la severidad del uno al cinco, donde cinco es muy crítico.", true);
+    setVoiceStatus("Escuchando severidad del obstáculo...", true);
+  }
+
+  function askVoiceObstacleNotes() {
+    voiceCommandMode = "obstacle_notes";
+    pendingVoiceMode = "obstacle_notes";
+    speakText("Puedes dictar un comentario. Si no deseas comentar, di sin comentario.", true);
+    setVoiceStatus("Escuchando comentario del obstáculo...", true);
+  }
+
+  function beginVoiceObstacleReport() {
+    const point = userLocation
+      ? { lat: userLocation.lat, lng: userLocation.lng }
+      : map.getCenter();
+
+    obstacleVoiceDraft = {
+      lat: Number(point.lat),
+      lng: Number(point.lng),
+      type: null,
+      severity: null,
+      notes: ""
+    };
+
+    speakText("Iniciando reporte por voz en tu ubicación actual.", true);
+    askVoiceObstacleType();
+  }
+
+  async function handleVoiceObstacleStep(rawText) {
+    const text = String(rawText || "").trim();
+    const normalized = normalizeVoiceText(text);
+
+    if (normalized.includes("cancelar")) {
+      obstacleVoiceDraft = null;
+      voiceCommandMode = "command";
+      pendingVoiceMode = null;
+      speakText("Reporte por voz cancelado.", true);
+      setVoiceStatus("Reporte por voz cancelado.", false);
+      return;
+    }
+
+    if (!obstacleVoiceDraft) {
+      voiceCommandMode = "command";
+      pendingVoiceMode = null;
+      setVoiceStatus("No hay un reporte activo. Di: quiero reportar obstáculo.", false);
+      return;
+    }
+
+    if (voiceCommandMode === "obstacle_type") {
+      const type = parseVoiceObstacleType(text);
+      if (!type) {
+        pendingVoiceMode = "obstacle_type";
+        speakText("No reconocí el tipo. Di obra, escalera, bache, vereda rota, poste, inundación, inseguridad u otro.", true);
+        return;
+      }
+      obstacleVoiceDraft.type = type;
+      askVoiceObstacleSeverity();
+      return;
+    }
+
+    if (voiceCommandMode === "obstacle_severity") {
+      const severity = parseVoiceSeverity(text);
+      if (!severity) {
+        pendingVoiceMode = "obstacle_severity";
+        speakText("No entendí la severidad. Di un número del uno al cinco.", true);
+        return;
+      }
+      obstacleVoiceDraft.severity = severity;
+      askVoiceObstacleNotes();
+      return;
+    }
+
+    if (voiceCommandMode === "obstacle_notes") {
+      obstacleVoiceDraft.notes = normalized.includes("sin comentario") ? "" : text;
+
+      await registerObstacle({
+        lat: obstacleVoiceDraft.lat,
+        lng: obstacleVoiceDraft.lng,
+        type: obstacleVoiceDraft.type,
+        severity: obstacleVoiceDraft.severity,
+        notes: obstacleVoiceDraft.notes,
+        announceShared: true,
+        announceLocalOnly: true
+      });
+
+      obstacleVoiceDraft = null;
+      voiceCommandMode = "command";
+      pendingVoiceMode = null;
+      setVoiceStatus("Reporte por voz completado.", false);
+      return;
+    }
+  }
+
+  function handleVoiceCommand(rawText) {
+    const normalized = normalizeVoiceText(rawText);
+
+    if (!normalized) {
+      speakText("No escuché ningún comando. Intenta de nuevo.", true);
+      setVoiceStatus("No se detectó voz. Toca el micrófono para reintentar.", false);
+      return;
+    }
+
+    if (voiceCommandMode !== "command") {
+      handleVoiceObstacleStep(rawText);
+      return;
+    }
+
+    if (normalized.includes("quiero reportar") || normalized.includes("reportar obstaculo") || normalized.includes("reportar obstáculo")) {
+      beginVoiceObstacleReport();
+      return;
+    }
+
+    if (normalized.includes("iniciar trayecto") || normalized.includes("iniciar navegacion") || normalized.includes("iniciar navegación")) {
+      startNavigation();
+      return;
+    }
+
+    if (normalized.includes("pausar")) {
+      pauseNavigation();
+      return;
+    }
+
+    if (normalized.includes("reanudar") || normalized.includes("continuar")) {
+      resumeNavigation();
+      return;
+    }
+
+    if (normalized.includes("detener")) {
+      stopNavigation();
+      return;
+    }
+
+    if (normalized.includes("repetir")) {
+      repeatCurrentInstruction();
+      return;
+    }
+
+    if (normalized.includes("centrar") || normalized.includes("mi ubicacion") || normalized.includes("mi ubicación")) {
+      centerOnUser();
+      return;
+    }
+
+    if (normalized.includes("mapa satelite") || normalized.includes("mapa satélite") || normalized.includes("satelite") || normalized.includes("satélite")) {
+      setMapStyle("satellite");
+      return;
+    }
+
+    if (normalized.includes("alto contraste") || normalized.includes("contraste")) {
+      setMapStyle("contrast");
+      return;
+    }
+
+    if (normalized.includes("mapa calles") || normalized.includes("calles")) {
+      setMapStyle("streets");
+      return;
+    }
+
+    const routeMatch = normalized.match(/ruta\s+([1-3])/);
+    if (routeMatch) {
+      const index = Number(routeMatch[1]) - 1;
+      if (currentRoutes[index]) {
+        selectRoute(index);
+      } else {
+        speakText("Esa ruta no está disponible aún.", true);
+      }
+      return;
+    }
+
+    const destinationQuery = extractDestinationFromCommand(rawText);
+    searchDestinationByVoice(destinationQuery);
+  }
+
+  function initVoiceRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      voiceRecognitionSupported = false;
+      setVoiceStatus("Tu navegador no soporta reconocimiento de voz. Puedes seguir usando texto.", false);
+      if (voiceCommandBtn) voiceCommandBtn.disabled = true;
+      return;
+    }
+
+    voiceRecognitionSupported = true;
+    voiceRecognition = new SpeechRecognition();
+    voiceRecognition.lang = "es-PE";
+    voiceRecognition.interimResults = false;
+    voiceRecognition.maxAlternatives = 1;
+    voiceRecognition.continuous = false;
+
+    voiceRecognition.onstart = () => {
+      voiceListening = true;
+      setVoiceStatus("Escuchando...", true);
+    };
+
+    voiceRecognition.onresult = (event) => {
+      const transcript = event.results?.[0]?.[0]?.transcript || "";
+      setVoiceStatus(`Escuchado: ${transcript}`, false);
+      handleVoiceCommand(transcript);
+    };
+
+    voiceRecognition.onerror = (event) => {
+      console.warn("Reconocimiento de voz:", event.error);
+      voiceListening = false;
+      setVoiceStatus("No se pudo reconocer la voz. Intenta nuevamente.", false);
+    };
+
+    voiceRecognition.onend = () => {
+      voiceListening = false;
+      const nextMode = pendingVoiceMode;
+      pendingVoiceMode = null;
+
+      if (nextMode) {
+        setTimeout(() => {
+          startVoiceRecognition(nextMode, true);
+        }, 900);
+        return;
+      }
+
+      setVoiceStatus("Voz lista. Di: quiero ir a..., iniciar trayecto o quiero reportar obstáculo.", false);
+    };
+  }
+
+  function startVoiceRecognition(mode = "command", internalFollowUp = false) {
+    if (!voiceRecognitionSupported || !voiceRecognition) {
+      speakText("Este navegador no soporta reconocimiento de voz.", true);
+      return;
+    }
+
+    if (voiceListening) return;
+
+    voiceCommandMode = mode;
+    if (!internalFollowUp) {
+      pendingVoiceMode = null;
+      if (mode === "command") {
+        speakText("Te escucho. Puedes decir por ejemplo: quiero ir a Plaza San Miguel.", true);
+      }
+    }
+
+    try {
+      voiceRecognition.start();
+    } catch (error) {
+      console.warn(error);
+      setVoiceStatus("No se pudo iniciar el micrófono. Reintenta.", false);
+    }
   }
 
   function setMapStyle(styleKey, silent = false) {
@@ -128,6 +539,7 @@
       }
     } else if (navigationPaused) {
       document.body.classList.add("nav-paused");
+      setRoutesPanelExpanded(false);
       if (navStatus) {
         navStatus.className = "nav-status paused";
       }
@@ -137,6 +549,7 @@
     } else {
       document.body.classList.add("nav-active");
       document.body.classList.add("instruction-only");
+      setRoutesPanelExpanded(false);
       if (navStatus) {
         navStatus.className = "nav-status active";
       }
@@ -180,8 +593,398 @@
     pauseNavigation();
   }
 
+  function setRoutesPanelExpanded(expanded) {
+    routesPanelExpanded = Boolean(expanded);
+    if (!routesPanel || !toggleRoutesPanelBtn) return;
+
+    routesPanel.classList.toggle("expanded", routesPanelExpanded);
+    toggleRoutesPanelBtn.textContent = routesPanelExpanded ? "▼" : "▲";
+    toggleRoutesPanelBtn.title = routesPanelExpanded ? "Contraer panel" : "Expandir panel";
+    toggleRoutesPanelBtn.setAttribute("aria-label", routesPanelExpanded ? "Contraer panel de rutas" : "Expandir panel de rutas");
+  }
+
+  function toggleRoutesPanel() {
+    setRoutesPanelExpanded(!routesPanelExpanded);
+  }
+
   function setRoutesMessage(html) {
     routesContent.innerHTML = html;
+  }
+
+  function getObstacleTypeLabel(type) {
+    const key = String(type || "").toLowerCase();
+    const labels = {
+      obra: "Obra",
+      escalera: "Escalera",
+      bache: "Bache",
+      vereda_rota: "Vereda rota",
+      poste: "Poste u objeto",
+      inundacion: "Inundación",
+      inseguridad: "Zona insegura",
+      otro: "Otro"
+    };
+    return labels[key] || "Otro";
+  }
+
+  function normalizeObstacle(record) {
+    const lat = Number(record?.lat);
+    const lng = Number(record?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    return {
+      id: String(record?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+      lat,
+      lng,
+      type: String(record?.type || "otro").toLowerCase(),
+      severity: Math.max(1, Math.min(5, Number(record?.severity) || 3)),
+      notes: String(record?.notes || "").trim(),
+      createdAt: record?.createdAt || record?.created_at || new Date().toISOString(),
+      active: record?.active !== false
+    };
+  }
+
+  function getStoredObstaclesLocal() {
+    try {
+      const raw = localStorage.getItem(OBSTACLE_STORE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map(normalizeObstacle).filter(Boolean).filter(item => item.active !== false);
+    } catch (error) {
+      console.warn("No se pudo leer obstáculos locales:", error);
+      return [];
+    }
+  }
+
+  function persistObstaclesLocal(items) {
+    try {
+      localStorage.setItem(OBSTACLE_STORE_KEY, JSON.stringify(items));
+    } catch (error) {
+      console.warn("No se pudo guardar obstáculos locales:", error);
+    }
+  }
+
+  async function fetchObstaclesRemote() {
+    if (!supabaseEnabled) return [];
+
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/obstacles?select=*&active=eq.true&order=created_at.desc&limit=600`, {
+      headers: {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        "Accept": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error("No se pudo sincronizar obstáculos del servidor.");
+    }
+
+    const data = await response.json();
+    return (data || []).map(normalizeObstacle).filter(Boolean);
+  }
+
+  async function saveObstacleRemote(obstacle) {
+    if (!supabaseEnabled) return;
+
+    const payload = {
+      id: obstacle.id,
+      lat: obstacle.lat,
+      lng: obstacle.lng,
+      type: obstacle.type,
+      severity: obstacle.severity,
+      notes: obstacle.notes,
+      created_at: obstacle.createdAt,
+      active: true
+    };
+
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/obstacles`, {
+      method: "POST",
+      headers: {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error("No se pudo guardar el obstáculo en el servidor.");
+    }
+  }
+
+  function renderObstaclesOnMap() {
+    obstacleMarkers.forEach(marker => map.removeLayer(marker));
+    obstacleMarkers = [];
+
+    obstacles.forEach(obstacle => {
+      const marker = L.marker([obstacle.lat, obstacle.lng], {
+        icon: createObstacleIcon(obstacle.severity)
+      }).addTo(map);
+
+      const timestamp = new Date(obstacle.createdAt).toLocaleString("es-PE");
+      const severityColor = ['#4ade80', '#60a5fa', '#fbbf24', '#fb923c', '#ef4444'][obstacle.severity - 1] || '#64748b';
+      const severityLabel = ['Bajo', 'Moderado', 'Significativo', 'Alto', 'Crítico'][obstacle.severity - 1] || 'Normal';
+      const typeLabel = escapeHtml(getObstacleTypeLabel(obstacle.type));
+      const notes = obstacle.notes ? `<div class="popup-notes">"${escapeHtml(obstacle.notes)}"</div>` : '';
+      
+      const popupHTML = `
+        <div class="popup-container">
+          <div class="popup-header">
+            <span class="popup-type">${typeLabel}</span>
+            <span class="popup-badge" style="background-color:${severityColor}; color:white;">${severityLabel}</span>
+          </div>
+          ${notes}
+          <div class="popup-footer">
+            <div class="popup-severity">Nivel: ${obstacle.severity}/5</div>
+            <div class="popup-time">📅 ${timestamp}</div>
+          </div>
+        </div>
+      `;
+      
+      marker.bindPopup(popupHTML);
+
+      obstacleMarkers.push(marker);
+    });
+  }
+
+  function rebuildRouteAssessments() {
+    routeAssessments = [];
+    recommendedRouteIndex = null;
+
+    if (!currentRoutes.length) return;
+
+    let bestIndex = 0;
+    let bestScore = Number.POSITIVE_INFINITY;
+
+    currentRoutes.forEach((route, index) => {
+      const assessment = assessRoute(route);
+      routeAssessments[index] = assessment;
+
+      if (assessment.totalScore < bestScore) {
+        bestScore = assessment.totalScore;
+        bestIndex = index;
+      }
+    });
+
+    recommendedRouteIndex = bestIndex;
+
+    if (selectedRouteIndex === null || !currentRoutes[selectedRouteIndex]) {
+      selectedRouteIndex = recommendedRouteIndex;
+    }
+  }
+
+  function isAssessmentHighRisk(assessment) {
+    if (!assessment) return false;
+    return assessment.nearbyObstacleCount >= HIGH_RISK_OBSTACLE_COUNT || assessment.obstaclePenalty >= HIGH_RISK_PENALTY;
+  }
+
+  function enforceSaferRouteIfNeeded(options = {}) {
+    const { announce = false, reasonText = "" } = options;
+
+    if (!currentRoutes.length || recommendedRouteIndex === null) return false;
+    if (selectedRouteIndex === null || !currentRoutes[selectedRouteIndex]) {
+      selectedRouteIndex = recommendedRouteIndex;
+      return true;
+    }
+
+    if (selectedRouteIndex === recommendedRouteIndex) return false;
+
+    const selectedAssessment = routeAssessments[selectedRouteIndex];
+    const recommendedAssessment = routeAssessments[recommendedRouteIndex];
+    if (!selectedAssessment || !recommendedAssessment) return false;
+
+    const selectedIsHighRisk = isAssessmentHighRisk(selectedAssessment);
+    const improvement = (selectedAssessment.totalScore - recommendedAssessment.totalScore) / Math.max(1, selectedAssessment.totalScore);
+    const shouldForce = selectedIsHighRisk || improvement >= FORCE_SWITCH_MIN_IMPROVEMENT;
+
+    if (!shouldForce) return false;
+
+    selectedRouteIndex = recommendedRouteIndex;
+
+    if (announce) {
+      const detail = reasonText || "La ruta elegida tiene varios obstáculos.";
+      speakText(`${detail} Te cambié automáticamente a la ruta ${selectedRouteIndex + 1}, que es más segura.`, true);
+    }
+
+    return true;
+  }
+
+  function refreshObstacleAwareRouting() {
+    renderObstaclesOnMap();
+
+    if (!currentRoutes.length) return;
+
+    const previousRecommendation = recommendedRouteIndex;
+    rebuildRouteAssessments();
+
+    const switchedToSafeRoute = enforceSaferRouteIfNeeded({
+      announce: !navigationActive,
+      reasonText: "Se detectaron nuevos obstáculos en tu ruta actual."
+    });
+
+    if (navigationActive && switchedToSafeRoute) {
+      selectedRouteSteps = buildNavigationSteps(currentRoutes[selectedRouteIndex]);
+      navigationStepIndex = 0;
+      lastSpokenStepIndex = -1;
+      distanceToCurrentStep = null;
+      announcedStepAlerts.clear();
+      showNavigationInstruction(0);
+    }
+
+    rerenderRoutes();
+    renderRoutesList();
+
+    if (!navigationActive && previousRecommendation !== null && recommendedRouteIndex !== previousRecommendation) {
+      speakText(`Se actualizó la ruta recomendada. Ahora la mejor opción es la ruta ${recommendedRouteIndex + 1}.`, true);
+    }
+  }
+
+  async function loadObstacles() {
+    const localItems = getStoredObstaclesLocal();
+    obstacles = localItems;
+    renderObstaclesOnMap();
+
+    if (!supabaseEnabled) return;
+
+    try {
+      const remoteItems = await fetchObstaclesRemote();
+      if (remoteItems.length) {
+        obstacles = remoteItems;
+        persistObstaclesLocal(obstacles);
+        refreshObstacleAwareRouting();
+      }
+    } catch (error) {
+      console.warn(error.message);
+    }
+  }
+
+  function startObstacleSync() {
+    if (!supabaseEnabled) return;
+    if (obstacleSyncTimer) clearInterval(obstacleSyncTimer);
+
+    obstacleSyncTimer = setInterval(async () => {
+      try {
+        const remoteItems = await fetchObstaclesRemote();
+        if (!remoteItems.length) return;
+
+        const newDigest = JSON.stringify(remoteItems.map(item => `${item.id}:${item.createdAt}`));
+        const currentDigest = JSON.stringify(obstacles.map(item => `${item.id}:${item.createdAt}`));
+        if (newDigest !== currentDigest) {
+          obstacles = remoteItems;
+          persistObstaclesLocal(obstacles);
+          refreshObstacleAwareRouting();
+        }
+      } catch (error) {
+        console.warn("Error sincronizando obstáculos:", error.message);
+      }
+    }, OBSTACLE_SYNC_MS);
+  }
+
+  function toggleReportMode(forceValue) {
+    reportModeActive = typeof forceValue === "boolean" ? forceValue : !reportModeActive;
+
+    if (reportObstacleBtn) {
+      reportObstacleBtn.classList.toggle("active", reportModeActive);
+      reportObstacleBtn.title = reportModeActive
+        ? "Toca el mapa para reportar obstáculo"
+        : "Reportar obstáculo";
+    }
+
+    if (reportModeActive) {
+      speakText("Modo reporte activo. Toca un punto en el mapa para registrar el obstáculo.", true);
+    } else {
+      speakText("Modo reporte desactivado.", true);
+    }
+  }
+
+  function askObstacleType() {
+    const answer = window.prompt(
+      "Tipo de obstáculo:\nobra, escalera, bache, vereda_rota, poste, inundacion, inseguridad, otro",
+      "obra"
+    );
+
+    if (answer === null) return null;
+    const normalized = normalizeSearchText(answer).replace(/\s+/g, "_");
+    const allowed = new Set(["obra", "escalera", "bache", "vereda_rota", "poste", "inundacion", "inseguridad", "otro"]);
+    return allowed.has(normalized) ? normalized : "otro";
+  }
+
+  function askObstacleSeverity() {
+    const raw = window.prompt("Severidad del 1 al 5 (5 = muy crítico)", "3");
+    if (raw === null) return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return 3;
+    return Math.max(1, Math.min(5, Math.round(value)));
+  }
+
+  function askObstacleNotes() {
+    const raw = window.prompt("Comentario opcional del obstáculo", "");
+    if (raw === null) return "";
+    return String(raw).trim();
+  }
+
+  async function registerObstacle({ lat, lng, type, severity, notes, announceShared = true, announceLocalOnly = true }) {
+    const obstacle = normalizeObstacle({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      lat,
+      lng,
+      type,
+      severity,
+      notes,
+      createdAt: new Date().toISOString(),
+      active: true
+    });
+
+    if (!obstacle) return false;
+
+    obstacles = [obstacle, ...obstacles].slice(0, 600);
+    persistObstaclesLocal(obstacles);
+    refreshObstacleAwareRouting();
+
+    try {
+      await saveObstacleRemote(obstacle);
+      if (announceShared) {
+        speakText("Obstáculo reportado y compartido.", true);
+      }
+    } catch (error) {
+      console.warn(error.message);
+      if (announceLocalOnly) {
+        speakText("Obstáculo reportado en este dispositivo. Configura Supabase para compartirlo con otros usuarios.", true);
+      }
+    }
+
+    return true;
+  }
+
+  async function handleMapObstacleReport(event) {
+    if (!reportModeActive) return;
+
+    const type = askObstacleType();
+    if (type === null) {
+      toggleReportMode(false);
+      return;
+    }
+
+    const severity = askObstacleSeverity();
+    if (severity === null) {
+      toggleReportMode(false);
+      return;
+    }
+
+    const notes = askObstacleNotes();
+
+    await registerObstacle({
+      lat: event.latlng.lat,
+      lng: event.latlng.lng,
+      type,
+      severity,
+      notes,
+      announceShared: true,
+      announceLocalOnly: true
+    });
+
+    toggleReportMode(false);
   }
 
   function formatDistance(meters) {
@@ -477,15 +1280,21 @@
   }
 
   function getRouteColor(index) {
-    return index === selectedRouteIndex ? "#20b15a" : "#9ca3af";
+    if (index === selectedRouteIndex) {
+      return "#10b981"; // Verde brillante para ruta seleccionada
+    }
+    if (index === recommendedRouteIndex) {
+      return "#3b82f6"; // Azul para ruta recomendada
+    }
+    return "#cbd5e1"; // Gris claro para rutas alternativas
   }
 
   function getRouteWeight(index) {
-    return index === selectedRouteIndex ? 7 : 5;
+    return index === selectedRouteIndex ? 8 : index === recommendedRouteIndex ? 6 : 4;
   }
 
   function getRouteOpacity(index) {
-    return index === selectedRouteIndex ? 0.92 : 0.6;
+    return index === selectedRouteIndex ? 1 : index === recommendedRouteIndex ? 0.7 : 0.4;
   }
 
   function escapeHtml(text) {
@@ -547,6 +1356,121 @@
       Math.sin(dLng / 2) * Math.sin(dLng / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
+  }
+
+  function toMetersProjection(lat, lng, originLat) {
+    const kx = 111320 * Math.cos(originLat * Math.PI / 180);
+    const ky = 110540;
+    return {
+      x: lng * kx,
+      y: lat * ky
+    };
+  }
+
+  function pointSegmentDistanceMeters(pointLat, pointLng, startLat, startLng, endLat, endLng) {
+    const originLat = (pointLat + startLat + endLat) / 3;
+    const p = toMetersProjection(pointLat, pointLng, originLat);
+    const a = toMetersProjection(startLat, startLng, originLat);
+    const b = toMetersProjection(endLat, endLng, originLat);
+
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const apx = p.x - a.x;
+    const apy = p.y - a.y;
+    const abSquared = abx * abx + aby * aby;
+
+    if (abSquared === 0) {
+      const dx = p.x - a.x;
+      const dy = p.y - a.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / abSquared));
+    const projX = a.x + t * abx;
+    const projY = a.y + t * aby;
+    const dx = p.x - projX;
+    const dy = p.y - projY;
+
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function getMinDistanceToRouteMeters(obstacle, route) {
+    const coords = route?.geometry?.coordinates || [];
+    if (coords.length < 2) return Number.POSITIVE_INFINITY;
+
+    let minDistance = Number.POSITIVE_INFINITY;
+
+    for (let index = 0; index < coords.length - 1; index++) {
+      const start = coords[index];
+      const end = coords[index + 1];
+      const distance = pointSegmentDistanceMeters(
+        obstacle.lat,
+        obstacle.lng,
+        start[1],
+        start[0],
+        end[1],
+        end[0]
+      );
+
+      if (distance < minDistance) {
+        minDistance = distance;
+      }
+    }
+
+    return minDistance;
+  }
+
+  function getObstacleTypeWeight(type) {
+    const key = String(type || "").toLowerCase();
+    const weights = {
+      obra: 1.35,
+      escalera: 1.8,
+      bache: 1.15,
+      vereda_rota: 1.45,
+      poste: 1.2,
+      inundacion: 1.65,
+      inseguridad: 2.1,
+      otro: 1.0
+    };
+    return weights[key] || 1.0;
+  }
+
+  function assessRoute(route) {
+    const summary = route?.properties?.summary || {};
+    const duration = Number(summary.duration || 0);
+    const distance = Number(summary.distance || 0);
+
+    let obstaclePenalty = 0;
+    let nearbyObstacleCount = 0;
+
+    obstacles.forEach(obstacle => {
+      const nearDistance = getMinDistanceToRouteMeters(obstacle, route);
+      if (!Number.isFinite(nearDistance) || nearDistance > 45) return;
+
+      nearbyObstacleCount++;
+
+      const severityWeight = 0.85 + obstacle.severity * 0.45;
+      const typeWeight = getObstacleTypeWeight(obstacle.type);
+      const closenessWeight = nearDistance <= 12 ? 1.6 : nearDistance <= 24 ? 1.2 : 0.75;
+
+      obstaclePenalty += severityWeight * typeWeight * closenessWeight;
+    });
+
+    const totalScore = duration + distance * 0.07 + obstaclePenalty * 220;
+    return {
+      duration,
+      distance,
+      nearbyObstacleCount,
+      obstaclePenalty,
+      totalScore
+    };
+  }
+
+  function getSafetyLabel(assessment) {
+    if (!assessment || assessment.nearbyObstacleCount === 0) return "Muy segura";
+    if (assessment.obstaclePenalty <= 4) return "Segura";
+    if (assessment.obstaclePenalty <= 9) return "Precaución";
+    return "Riesgo alto";
   }
 
   function buildNavigationSteps(route) {
@@ -664,13 +1588,24 @@
 
     if (remainingCoords.length >= 2) {
       const line = L.polyline(remainingCoords, {
-        color: "#0ea5e9",
-        weight: 8,
+        color: "#10b981",
+        weight: 10,
         opacity: 0.95,
         lineCap: "round",
-        lineJoin: "round"
+        lineJoin: "round",
+        className: "active-nav-route"
       }).addTo(map);
 
+      const glowLine = L.polyline(remainingCoords, {
+        color: "#10b981",
+        weight: 20,
+        opacity: 0.2,
+        lineCap: "round",
+        lineJoin: "round",
+        className: "active-nav-glow"
+      }).addTo(map);
+
+      routeLayers.push(glowLine);
       routeLayers.push(line);
     }
   }
@@ -726,8 +1661,10 @@
       }
 
       currentRoutes = data.features;
-      selectedRouteIndex = 0;
-      selectedRouteSteps = buildNavigationSteps(currentRoutes[0]);
+      selectedRouteIndex = null;
+      rebuildRouteAssessments();
+      const safeIndex = selectedRouteIndex ?? 0;
+      selectedRouteSteps = buildNavigationSteps(currentRoutes[safeIndex]);
       navigationStepIndex = 0;
       lastSpokenStepIndex = -1;
       distanceToCurrentStep = null;
@@ -829,6 +1766,12 @@
       speakText("Tu navegador no soporta seguimiento de ubicación.", true);
       return;
     }
+
+    rebuildRouteAssessments();
+    enforceSaferRouteIfNeeded({
+      announce: true,
+      reasonText: "La ruta seleccionada tiene demasiados obstáculos"
+    });
 
     selectedRouteSteps = buildNavigationSteps(currentRoutes[selectedRouteIndex]);
     navigationStepIndex = 0;
@@ -1124,10 +2067,12 @@
 
       currentRoutes = data.features;
       selectedRouteIndex = null;
+      rebuildRouteAssessments();
 
       drawRoutes();
       renderRoutesList();
-      speakText(`Se encontraron ${currentRoutes.length} rutas disponibles. Elige una ruta para escuchar sus indicaciones.`, true);
+      const recommended = recommendedRouteIndex !== null ? ` Ruta recomendada: ${recommendedRouteIndex + 1}.` : "";
+      speakText(`Se encontraron ${currentRoutes.length} rutas disponibles.${recommended} Elige una ruta para escuchar sus indicaciones.`, true);
 
     } catch (error) {
       console.error(error);
@@ -1205,29 +2150,31 @@
       return;
     }
 
-    let html = `
-      <h3 class="panel-title">Rutas peatonales</h3>
-      <div class="sub-note">
-        Se muestra una sola indicación por vez para evitar sobrecarga y facilitar el acompañamiento.
-      </div>
-    `;
+    let html = "";
 
     currentRoutes.forEach((route, index) => {
       const summary = route.properties.summary;
       const isSelected = index === selectedRouteIndex;
+      const isRecommended = index === recommendedRouteIndex;
+      const assessment = routeAssessments[index];
+      const safetyLabel = getSafetyLabel(assessment);
+      const safetyMeta = assessment
+        ? `${assessment.nearbyObstacleCount} obstáculos cercanos • ${safetyLabel}`
+        : "Sin evaluación de seguridad";
 
       html += `
         <div class="route-card ${isSelected ? "active" : ""}" data-route-index="${index}">
           <div class="route-card-top">
             <div class="route-title">Ruta ${index + 1}</div>
-            <div class="badge">${index === 0 ? "Recomendada" : "Alternativa"}</div>
+            <div class="badge">${isRecommended ? "Recomendada" : "Alternativa"}</div>
           </div>
           <div class="route-meta">
             <span><strong>${formatDuration(summary.duration)}</strong></span>
             <span>${formatDistance(summary.distance)}</span>
+            <span>${escapeHtml(safetyMeta)}</span>
           </div>
           <div class="route-summary">
-            ${isSelected ? "Ruta seleccionada." : "Toca para elegir esta ruta."}
+            ${isSelected ? "Ruta seleccionada." : isRecommended ? "Más equilibrada entre seguridad y rapidez." : "Toca para elegir esta ruta."}
           </div>
           ${isSelected ? buildInstructionsHtml(route) : ""}
         </div>
@@ -1248,6 +2195,13 @@
     selectedRouteIndex = index;
     stopNavigation(true);
     hideCurrentStep();
+
+    rebuildRouteAssessments();
+    enforceSaferRouteIfNeeded({
+      announce: true,
+      reasonText: "Esa ruta presenta mayor riesgo"
+    });
+
     drawRoutes();
     renderRoutesList();
 
@@ -1448,7 +2402,19 @@
     }
   });
 
+  if (voiceCommandBtn) {
+    voiceCommandBtn.addEventListener("click", () => {
+      startVoiceRecognition("command");
+    });
+  }
+
   gpsBtn.addEventListener("click", centerOnUser);
+  if (toggleRoutesPanelBtn) {
+    toggleRoutesPanelBtn.addEventListener("click", toggleRoutesPanel);
+  }
+  if (reportObstacleBtn) {
+    reportObstacleBtn.addEventListener("click", () => toggleReportMode());
+  }
   mapStyleSelect.addEventListener("change", (event) => {
     setMapStyle(event.target.value);
   });
@@ -1464,12 +2430,18 @@
     btnQuickStop.addEventListener("click", () => stopNavigation());
   }
 
+  map.on("click", handleMapObstacleReport);
+
   loadSpanishVoice();
   if (speechSynthesis.onvoiceschanged !== undefined) {
     speechSynthesis.onvoiceschanged = loadSpanishVoice;
   }
 
   setMapStyle("streets", true);
+  setRoutesPanelExpanded(false);
+  loadObstacles();
+  startObstacleSync();
   initLocation();
   initCompass();
+  initVoiceRecognition();
   updateNavigationUiState();

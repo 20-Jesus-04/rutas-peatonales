@@ -24,9 +24,13 @@
           autocomplete="off"
         />
       </div>
+      <button id="voiceCommandBtn" class="voice-command-btn" title="Comandos por voz" aria-label="Activar comandos por voz">🎤</button>
       <button id="gpsBtn" class="gps-btn" title="Centrar en mi ubicación">📍</button>
+      <button id="reportObstacleBtn" class="report-btn" title="Reportar obstáculo">🚧</button>
     </div>
     <div class="hint">Escribe al menos 3 letras. Usa ↑ ↓ y Enter para elegir.</div>
+    <div id="voiceStatus" class="hint voice-hint" aria-live="polite">Voz lista. Di: "quiero ir a ..." o "quiero reportar obstáculo".</div>
+    <div id="obstacleHint" class="hint obstacle-hint">Las rutas priorizan zonas con menos obstáculos reportados.</div>
     <div class="map-style-row">
       <label class="map-style-label" for="mapStyleSelect">Mapa</label>
       <select id="mapStyleSelect" class="map-style-select" aria-label="Tipo de mapa">
@@ -40,6 +44,7 @@
 </div>
 
 <div class="routes-panel">
+  <button id="toggleRoutesPanelBtn" class="panel-toggle-btn" title="Expandir panel" aria-label="Expandir o contraer panel de rutas">▲</button>
   <h3 class="panel-title">Rutas peatonales</h3>
   <div class="sub-note">
     Diseñada para uso directo y también para asistentes de personas con discapacidad visual.
