@@ -2,6 +2,8 @@
   const OBSTACLE_STORE_KEY = "rutas_peatonales_obstacles_v1";
   const OBSTACLE_SYNC_MS = 30000;
   const ACCESSIBILITY_SETTINGS_KEY = "rutas_peatonales_accessibility_v1";
+  const VISION_AI_LIB_TFJS = "https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js";
+  const VISION_AI_LIB_COCO = "https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js";
   const USER_PROFILE_KEY = "rutas_peatonales_user_profile_v1";
   const RECENT_ROUTES_KEY = "rutas_peatonales_recent_routes_v1";
   const HIGH_RISK_OBSTACLE_COUNT = 5;
@@ -81,6 +83,7 @@
   const accessProfileBtn = document.getElementById("accessProfileBtn");
   const nearbyAlertsBtn = document.getElementById("nearbyAlertsBtn");
   const vibrationBtn = document.getElementById("vibrationBtn");
+  const visionAiBtn = document.getElementById("visionAiBtn");
   const voiceHelpBtn = document.getElementById("voiceHelpBtn");
   const accessStatus = document.getElementById("accessStatus");
   const editUserBtn = document.getElementById("editUserBtn");
@@ -97,6 +100,13 @@
   const compassNeedle = document.getElementById("compassNeedle");
   const navStatus = document.getElementById("navStatus");
   const navStatusText = document.getElementById("navStatusText");
+  const visionAiPanel = document.getElementById("visionAiPanel");
+  const visionAiCloseBtn = document.getElementById("visionAiCloseBtn");
+  const visionAiVideo = document.getElementById("visionAiVideo");
+  const visionAiCanvas = document.getElementById("visionAiCanvas");
+  const visionAiStatus = document.getElementById("visionAiStatus");
+  const visionAiGuidance = document.getElementById("visionAiGuidance");
+  const visionAiLabels = document.getElementById("visionAiLabels");
 
   const btnSpeak = document.getElementById("btnSpeak");
   const btnPause = document.getElementById("btnPause");
@@ -135,6 +145,7 @@
     visualMode: false,
     nearbyAlerts: true,
     vibration: true,
+    computerVision: false,
     profile: "equilibrado"
   };
   let lastSpokenText = "";
@@ -145,6 +156,14 @@
     bucket: null,
     timestamp: 0
   };
+  let visionAiStream = null;
+  let visionAiModel = null;
+  let visionAiLoopTimer = null;
+  let visionAiDetecting = false;
+  let visionAiModelPromise = null;
+  let visionAiLastAlertAt = 0;
+  let visionAiLastAlertLabel = "";
+  let visionAiCanvasCtx = null;
   let userProfile = null;
   let recentRoutes = [];
 
@@ -472,6 +491,21 @@
 
     if (normalized.includes("vibracion") || normalized.includes("vibración")) {
       toggleVibration();
+      return;
+    }
+
+    if (normalized.includes("activar vision artificial") || normalized.includes("activar visión artificial") || normalized.includes("activar camara inteligente") || normalized.includes("activar cámara inteligente")) {
+      startVisionArtificial();
+      return;
+    }
+
+    if (normalized.includes("desactivar vision artificial") || normalized.includes("desactivar visión artificial") || normalized.includes("apagar camara inteligente") || normalized.includes("apagar cámara inteligente")) {
+      stopVisionArtificial(true);
+      return;
+    }
+
+    if (normalized.includes("vision artificial") || normalized.includes("visión artificial") || normalized.includes("camara inteligente") || normalized.includes("cámara inteligente")) {
+      toggleVisionArtificial();
       return;
     }
 
@@ -847,6 +881,12 @@
       vibrationBtn.setAttribute("aria-pressed", accessibilitySettings.vibration ? "true" : "false");
       vibrationBtn.textContent = accessibilitySettings.vibration ? "📳 Vibración ON" : "📳 Vibración OFF";
     }
+
+    if (visionAiBtn) {
+      visionAiBtn.classList.toggle("active", accessibilitySettings.computerVision);
+      visionAiBtn.setAttribute("aria-pressed", accessibilitySettings.computerVision ? "true" : "false");
+      visionAiBtn.textContent = accessibilitySettings.computerVision ? "🧠 Visión IA ON" : "🧠 Visión IA";
+    }
   }
 
   function persistAccessibilitySettings() {
@@ -865,6 +905,7 @@
       accessibilitySettings.visualMode = Boolean(parsed?.visualMode);
       accessibilitySettings.nearbyAlerts = parsed?.nearbyAlerts !== false;
       accessibilitySettings.vibration = parsed?.vibration !== false;
+      accessibilitySettings.computerVision = Boolean(parsed?.computerVision);
       accessibilitySettings.profile = typeof parsed?.profile === "string" ? parsed.profile : "equilibrado";
     } catch (error) {
       console.warn("No se pudieron leer los ajustes de accesibilidad:", error.message);
@@ -922,6 +963,405 @@
     navigator.vibrate(pattern);
   }
 
+  function setVisionAiStatus(text) {
+    if (visionAiStatus) {
+      visionAiStatus.textContent = text;
+    }
+  }
+
+  function setVisionAiLabels(items) {
+    if (!visionAiLabels) return;
+    if (!items || !items.length) {
+      visionAiLabels.textContent = "Sin detecciones aún.";
+      return;
+    }
+    visionAiLabels.textContent = items.join(" · ");
+  }
+
+  function setVisionAiGuidance(text) {
+    if (!visionAiGuidance) return;
+    visionAiGuidance.textContent = text;
+  }
+
+  function setVisionAiPanelVisible(visible) {
+    if (!visionAiPanel) return;
+    visionAiPanel.hidden = !visible;
+  }
+
+  function loadVisionScript(url, marker) {
+    if (document.querySelector(`script[${marker}="true"]`)) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = url;
+      script.async = true;
+      script.defer = true;
+      script.setAttribute(marker, "true");
+      script.addEventListener("load", () => resolve(), { once: true });
+      script.addEventListener("error", () => reject(new Error(`No se pudo cargar ${url}`)), { once: true });
+      document.head.appendChild(script);
+    });
+  }
+
+  async function ensureVisionAiModelLoaded() {
+    if (visionAiModel) return visionAiModel;
+    if (visionAiModelPromise) return visionAiModelPromise;
+
+    visionAiModelPromise = (async () => {
+      await loadVisionScript(VISION_AI_LIB_TFJS, "data-tfjs");
+      await loadVisionScript(VISION_AI_LIB_COCO, "data-coco-ssd");
+
+      if (!window.cocoSsd) {
+        throw new Error("No se pudo inicializar el modelo COCO-SSD.");
+      }
+
+      visionAiModel = await window.cocoSsd.load({ base: "lite_mobilenet_v2" });
+      return visionAiModel;
+    })().catch((error) => {
+      visionAiModelPromise = null;
+      throw error;
+    });
+
+    return visionAiModelPromise;
+  }
+
+  function translateVisionLabel(label) {
+    const map = {
+      person: "persona",
+      bicycle: "bicicleta",
+      motorcycle: "motocicleta",
+      car: "auto",
+      bus: "bus",
+      truck: "camión",
+      dog: "perro",
+      traffic_light: "semáforo",
+      stop_sign: "señal de alto",
+      fire_hydrant: "poste/hidrante",
+      bench: "banco",
+      chair: "silla",
+      potted_plant: "planta",
+      suitcase: "maleta",
+      backpack: "mochila"
+    };
+    return map[label] || label;
+  }
+
+  function getVisionDirection(detection, frameWidth) {
+    const box = Array.isArray(detection?.bbox) ? detection.bbox : [0, 0, 0, 0];
+    const centerX = (Number(box[0]) || 0) + (Number(box[2]) || 0) / 2;
+    const ratio = frameWidth > 0 ? centerX / frameWidth : 0.5;
+
+    if (ratio < 0.33) return "izquierda";
+    if (ratio > 0.66) return "derecha";
+    return "centro";
+  }
+
+  function getVisionProximity(detection, frameWidth, frameHeight) {
+    const box = Array.isArray(detection?.bbox) ? detection.bbox : [0, 0, 0, 0];
+    const area = (Number(box[2]) || 0) * (Number(box[3]) || 0);
+    const frameArea = Math.max(1, (frameWidth || 1) * (frameHeight || 1));
+    const ratio = area / frameArea;
+
+    if (ratio >= 0.24) return "muy cerca";
+    if (ratio >= 0.12) return "cerca";
+    if (ratio >= 0.05) return "media distancia";
+    return "lejos";
+  }
+
+  function isObstacleClass(className) {
+    return [
+      "person",
+      "bicycle",
+      "motorcycle",
+      "car",
+      "bus",
+      "truck",
+      "dog",
+      "traffic light",
+      "stop sign",
+      "fire hydrant",
+      "bench",
+      "chair",
+      "potted plant",
+      "suitcase",
+      "backpack"
+    ].includes(className);
+  }
+
+  function normalizeVisionClass(rawClass) {
+    return String(rawClass || "").trim().toLowerCase();
+  }
+
+  function getSpokenObstacleName(rawClass) {
+    const normalized = normalizeVisionClass(rawClass);
+    if (["traffic light", "stop sign", "fire hydrant"].includes(normalized)) {
+      return "poste o señal";
+    }
+    return translateVisionLabel(normalized.replaceAll(" ", "_"));
+  }
+
+  function syncVisionCanvasSize() {
+    if (!visionAiCanvas || !visionAiVideo) return;
+    const w = visionAiVideo.videoWidth || 0;
+    const h = visionAiVideo.videoHeight || 0;
+    if (!w || !h) return;
+
+    if (visionAiCanvas.width !== w || visionAiCanvas.height !== h) {
+      visionAiCanvas.width = w;
+      visionAiCanvas.height = h;
+    }
+
+    if (!visionAiCanvasCtx) {
+      visionAiCanvasCtx = visionAiCanvas.getContext("2d");
+    }
+  }
+
+  function clearVisionOverlay() {
+    if (!visionAiCanvasCtx || !visionAiCanvas) return;
+    visionAiCanvasCtx.clearRect(0, 0, visionAiCanvas.width, visionAiCanvas.height);
+  }
+
+  function drawVisionOverlay(detections, highlightedId = "") {
+    if (!visionAiCanvasCtx || !visionAiCanvas) return;
+    clearVisionOverlay();
+
+    const ctx = visionAiCanvasCtx;
+    ctx.lineWidth = 3;
+    ctx.font = "bold 16px Manrope";
+
+    detections.forEach(item => {
+      const [x, y, w, h] = item.bbox || [0, 0, 0, 0];
+      const active = item._id === highlightedId;
+      ctx.strokeStyle = active ? "#ef4444" : "#22c55e";
+      ctx.fillStyle = active ? "rgba(239,68,68,0.16)" : "rgba(34,197,94,0.14)";
+
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.fill();
+      ctx.stroke();
+
+      const label = `${translateVisionLabel(String(item.class || "").replaceAll(" ", "_"))} ${Math.round((item.score || 0) * 100)}%`;
+      const textY = Math.max(18, y - 6);
+      ctx.fillStyle = active ? "#fee2e2" : "#dcfce7";
+      ctx.fillText(label, x + 4, textY);
+    });
+  }
+
+  function getVisionPriority(detection) {
+    const className = String(detection?.class || "");
+    const box = Array.isArray(detection?.bbox) ? detection.bbox : [0, 0, 0, 0];
+    const width = Number(box[2]) || 0;
+    const height = Number(box[3]) || 0;
+    const area = width * height;
+    const confidence = Number(detection?.score) || 0;
+
+    let base = 0;
+    if (["car", "bus", "truck", "motorcycle"].includes(className)) base = 7;
+    else if (className === "bicycle") base = 5;
+    else if (className === "person") base = 4;
+    else base = 1;
+
+    return base + area * 0.00004 + confidence * 2;
+  }
+
+  function summarizeVisionDetections(detections) {
+    const top = [...detections]
+      .sort((a, b) => getVisionPriority(b) - getVisionPriority(a))
+      .slice(0, 3);
+
+    const labels = top.map(item => {
+      const name = translateVisionLabel(item.class);
+      const score = Math.round((Number(item.score) || 0) * 100);
+      return `${name} ${score}%`;
+    });
+
+    return { top, labels };
+  }
+
+  function maybeSpeakVisionAlert(topDetections) {
+    if (!topDetections.length) return;
+
+    const first = topDetections[0];
+    const className = first._spokenLabel || getSpokenObstacleName(first.class);
+    const direction = first._direction || "centro";
+    const proximity = first._proximity || "cerca";
+    const now = Date.now();
+    const cooldown = first._blocking ? 4200 : 7600;
+    const signature = `${className}-${direction}-${proximity}`;
+
+    if (visionAiLastAlertLabel === signature && now - visionAiLastAlertAt < cooldown) {
+      return;
+    }
+
+    visionAiLastAlertLabel = signature;
+    visionAiLastAlertAt = now;
+
+    const prefix = first._blocking ? "Peligro" : "Atención";
+    speakText(`${prefix}. ${className} a ${proximity}, ${direction}.`, true);
+    vibrateAlert(first._blocking ? [180, 70, 180, 70, 180] : [120, 80, 120]);
+  }
+
+  async function detectVisionFrame() {
+    if (!accessibilitySettings.computerVision) return;
+    if (!visionAiVideo || !visionAiModel || visionAiDetecting) return;
+    if (visionAiVideo.readyState < 2) return;
+
+    visionAiDetecting = true;
+    try {
+      syncVisionCanvasSize();
+      const predictions = await visionAiModel.detect(visionAiVideo, 12);
+      const frameWidth = visionAiVideo.videoWidth || 640;
+      const frameHeight = visionAiVideo.videoHeight || 480;
+
+      const important = (predictions || []).filter(item => {
+        const score = Number(item?.score) || 0;
+        const className = normalizeVisionClass(item?.class);
+        if (score < 0.55) return false;
+        return isObstacleClass(className);
+      }).map((item, index) => {
+        const className = normalizeVisionClass(item?.class);
+        const direction = getVisionDirection(item, frameWidth);
+        const proximity = getVisionProximity(item, frameWidth, frameHeight);
+        const blocking = direction === "centro" && (proximity === "muy cerca" || proximity === "cerca");
+
+        return {
+          ...item,
+          _id: `${className}-${index}`,
+          _direction: direction,
+          _proximity: proximity,
+          _blocking: blocking,
+          _spokenLabel: getSpokenObstacleName(className)
+        };
+      });
+
+      if (!important.length) {
+        setVisionAiStatus("Escaneando entorno...");
+        setVisionAiGuidance("Aún sin riesgo frontal.");
+        setVisionAiLabels([]);
+        clearVisionOverlay();
+        return;
+      }
+
+      const summary = summarizeVisionDetections(important);
+      const primary = summary.top[0];
+      const dangerous = summary.top.find(item => item._blocking) || primary;
+
+      setVisionAiStatus(`Objetos detectados: ${important.length}`);
+      setVisionAiGuidance(`Prioridad: ${dangerous._spokenLabel} ${dangerous._proximity}, ${dangerous._direction}.`);
+      setVisionAiLabels(summary.top.map(item => `${item._spokenLabel} ${item._proximity} ${item._direction}`));
+      drawVisionOverlay(summary.top, dangerous._id);
+      maybeSpeakVisionAlert([dangerous]);
+    } catch (error) {
+      console.warn("Visión IA:", error.message);
+      setVisionAiStatus("No se pudo analizar este cuadro.");
+      setVisionAiGuidance("Reintentando análisis...");
+      clearVisionOverlay();
+    } finally {
+      visionAiDetecting = false;
+    }
+  }
+
+  function stopVisionStream() {
+    if (visionAiLoopTimer) {
+      clearInterval(visionAiLoopTimer);
+      visionAiLoopTimer = null;
+    }
+
+    if (visionAiVideo) {
+      visionAiVideo.pause();
+      visionAiVideo.srcObject = null;
+    }
+
+    clearVisionOverlay();
+
+    if (visionAiStream) {
+      visionAiStream.getTracks().forEach(track => track.stop());
+      visionAiStream = null;
+    }
+  }
+
+  async function startVisionArtificial(silent = false) {
+    if (accessibilitySettings.computerVision && visionAiStream) {
+      setVisionAiPanelVisible(true);
+      return;
+    }
+
+    try {
+      setVisionAiPanelVisible(true);
+      setVisionAiStatus("Cargando modelo de visión...");
+      setVisionAiLabels([]);
+      accessibilitySettings.computerVision = true;
+      updateAccessibilityButtonsUi();
+      persistAccessibilitySettings();
+
+      await ensureVisionAiModelLoaded();
+
+      visionAiStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        },
+        audio: false
+      });
+
+      if (!visionAiVideo) {
+        throw new Error("No se encontró el elemento de video.");
+      }
+
+      visionAiVideo.srcObject = visionAiStream;
+      await visionAiVideo.play();
+
+      setVisionAiStatus("Visión IA activa. Escaneando entorno.");
+      setVisionAiGuidance("Enfoca el camino para detectar riesgos al frente.");
+      setAccessStatus("Visión artificial activada.");
+      if (!silent) {
+        speakText("Visión artificial activada. Analizando el entorno.", true);
+      }
+
+      if (visionAiLoopTimer) {
+        clearInterval(visionAiLoopTimer);
+      }
+      visionAiLoopTimer = setInterval(detectVisionFrame, 1200);
+      detectVisionFrame();
+    } catch (error) {
+      console.warn("No se pudo activar visión artificial:", error.message);
+      accessibilitySettings.computerVision = false;
+      updateAccessibilityButtonsUi();
+      persistAccessibilitySettings();
+      stopVisionStream();
+      setVisionAiPanelVisible(false);
+      setAccessStatus("No se pudo activar visión artificial.");
+      speakText("No pude activar visión artificial. Revisa permisos de cámara o compatibilidad del navegador.", true);
+    }
+  }
+
+  function stopVisionArtificial(silent = false) {
+    accessibilitySettings.computerVision = false;
+    updateAccessibilityButtonsUi();
+    persistAccessibilitySettings();
+    stopVisionStream();
+    setVisionAiPanelVisible(false);
+    setVisionAiStatus("Visión IA detenida.");
+    setVisionAiGuidance("Aún sin riesgo frontal.");
+    setVisionAiLabels([]);
+    setAccessStatus("Visión artificial desactivada.");
+
+    if (!silent) {
+      speakText("Visión artificial desactivada.", true);
+    }
+  }
+
+  function toggleVisionArtificial() {
+    if (accessibilitySettings.computerVision) {
+      stopVisionArtificial();
+      return;
+    }
+    startVisionArtificial();
+  }
+
   function speakVoiceCommandHelp() {
     const message = [
       "Comandos disponibles.",
@@ -929,6 +1369,7 @@
       "También: iniciar trayecto, pausar, reanudar, repetir o detener.",
       "Para reportes: quiero reportar obstáculo.",
       "Para accesibilidad: perfil ceguera, perfil baja visión o perfil equilibrado.",
+      "También: activar visión artificial o desactivar visión artificial.",
       "También puedes decir: alertas cercanas, vibración, alto contraste, satélite o calles.",
       "Para actualizar tus datos puedes decir: editar perfil."
     ].join(" ");
@@ -3121,6 +3562,14 @@
     vibrationBtn.addEventListener("click", toggleVibration);
   }
 
+  if (visionAiBtn) {
+    visionAiBtn.addEventListener("click", toggleVisionArtificial);
+  }
+
+  if (visionAiCloseBtn) {
+    visionAiCloseBtn.addEventListener("click", () => stopVisionArtificial());
+  }
+
   if (voiceHelpBtn) {
     voiceHelpBtn.addEventListener("click", speakVoiceCommandHelp);
   }
@@ -3180,9 +3629,19 @@
   initLocation();
   initCompass();
   initVoiceRecognition();
+
+  if (accessibilitySettings.computerVision) {
+    startVisionArtificial(true);
+  } else {
+    setVisionAiPanelVisible(false);
+  }
+
   updateNavigationUiState();
   syncAccessDockByViewport();
   window.addEventListener("resize", syncAccessDockByViewport);
+  window.addEventListener("beforeunload", () => {
+    stopVisionStream();
+  });
 
   if (!userProfile) {
     openAuthModal();
