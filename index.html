@@ -144,24 +144,9 @@
   <button id="editUserBtn" class="access-btn" type="button" title="Editar perfil de usuario">👤 Editar perfil</button>
   <button id="nearbyAlertsBtn" class="access-btn" type="button" aria-pressed="true" title="Alertas cercanas">📢 Alertas cercanas</button>
   <button id="vibrationBtn" class="access-btn" type="button" aria-pressed="true" title="Vibración háptica">📳 Vibración</button>
-  <button id="visionAiBtn" class="access-btn" type="button" aria-pressed="false" title="Asistencia por visión artificial">🧠 Visión IA</button>
   <button id="voiceHelpBtn" class="access-btn" type="button" title="Ayuda de comandos por voz">🧭 Ayuda voz</button>
   <div id="accessStatus" class="access-status" aria-live="polite">Accesibilidad lista.</div>
 </div>
-
-<section id="visionAiPanel" class="vision-ai-panel" aria-label="Panel de visión artificial" hidden>
-  <div class="vision-ai-head">
-    <h4 class="vision-ai-title">Visión Artificial</h4>
-    <button id="visionAiCloseBtn" class="vision-ai-close" type="button" aria-label="Cerrar visión artificial">✕</button>
-  </div>
-  <div class="vision-ai-media">
-    <video id="visionAiVideo" class="vision-ai-video" autoplay playsinline muted></video>
-    <canvas id="visionAiCanvas" class="vision-ai-overlay" aria-hidden="true"></canvas>
-  </div>
-  <div id="visionAiStatus" class="vision-ai-status" aria-live="polite">Inicializando cámara...</div>
-  <div id="visionAiGuidance" class="vision-ai-guidance" aria-live="polite">Aún sin riesgo frontal.</div>
-  <div id="visionAiLabels" class="vision-ai-labels" aria-live="polite">Sin detecciones aún.</div>
-</section>
 
 <div class="compass" title="Brújula">
   <div class="compass-ring">
