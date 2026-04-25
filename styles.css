@@ -1037,7 +1037,7 @@ body::before{
   position:fixed;
   left:12px;
   bottom:calc(var(--safe-bottom) + 12px);
-  z-index:1260;
+  z-index:1272;
   width:min(420px, calc(100vw - 24px));
   display:grid;
   grid-template-columns:repeat(2, minmax(0, 1fr));
@@ -1072,7 +1072,7 @@ body::before{
 .access-dock-backdrop{
   position:fixed;
   inset:0;
-  z-index:1265;
+  z-index:1260;
   background:rgba(2,6,23,.34);
   backdrop-filter:blur(2px);
   opacity:0;
@@ -2110,4 +2110,166 @@ input,
 .suggestions::-webkit-scrollbar-track,
 .routes-panel::-webkit-scrollbar-track{
   background:transparent;
+}
+
+/* RESPONSIVE TIPO WAZE + HEURISTICAS (MOBILE FIRST OVERRIDES) */
+@media (max-width: 900px){
+  .search-panel{
+    top:calc(var(--safe-top) + 8px);
+    left:8px;
+    right:8px;
+    border-radius:18px;
+    border:1px solid rgba(30,58,138,.16);
+    box-shadow:0 10px 24px rgba(2,8,23,.18);
+  }
+
+  .search-top{
+    padding:10px;
+  }
+
+  .search-row{
+    gap:8px;
+  }
+
+  .search-input{
+    min-height:50px;
+    border-radius:13px;
+    font-size:16px;
+  }
+
+  .voice-command-btn,
+  .gps-btn,
+  .report-btn{
+    width:50px;
+    min-width:50px;
+    height:50px;
+    border-radius:13px;
+  }
+
+  .suggestions{
+    max-height:min(34vh, 280px);
+  }
+
+  .routes-panel{
+    left:8px;
+    right:8px;
+    bottom:calc(var(--safe-bottom) + 8px);
+    border-radius:26px;
+    padding:20px 12px 12px 12px;
+    max-height:34vh;
+    box-shadow:0 16px 32px rgba(2,8,23,.26);
+  }
+
+  .routes-panel::before{
+    content:"";
+    position:absolute;
+    top:8px;
+    left:50%;
+    transform:translateX(-50%);
+    width:52px;
+    height:5px;
+    border-radius:999px;
+    background:rgba(100,116,139,.42);
+  }
+
+  .routes-panel.expanded{
+    max-height:78vh;
+  }
+
+  .panel-toggle-btn{
+    top:6px;
+    right:8px;
+    width:34px;
+    height:34px;
+    background:rgba(15,23,42,.1);
+    color:#0f172a;
+  }
+
+  .routes-panel:not(.expanded) .quick-guide,
+  .routes-panel:not(.expanded) .sub-note,
+  .routes-panel:not(.expanded) .voice-btn.secondary,
+  .routes-panel:not(.expanded) .frequent-routes-box,
+  .routes-panel:not(.expanded) .user-summary{
+    display:none;
+  }
+
+  .routes-panel:not(.expanded) .voice-controls{
+    grid-template-columns:1fr;
+  }
+
+  .voice-controls{
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:8px;
+  }
+
+  .voice-btn{
+    min-height:46px;
+    font-size:13px;
+    padding:10px 8px;
+  }
+
+  .nav-status{
+    position:sticky;
+    top:0;
+    z-index:2;
+  }
+
+  .access-dock-toggle{
+    right:8px;
+    bottom:calc(var(--safe-bottom) + 80px);
+  }
+
+  .accessibility-dock{
+    bottom:calc(var(--safe-bottom) + 132px);
+  }
+
+  .vision-ai-panel{
+    bottom:calc(var(--safe-bottom) + 188px);
+  }
+}
+
+@media (max-width: 480px){
+  .search-panel .hint:not(.voice-hint),
+  .search-panel .map-style-row{
+    display:none;
+  }
+
+  .routes-panel{
+    max-height:32vh;
+    border-radius:24px;
+  }
+
+  .routes-panel.expanded{
+    max-height:76vh;
+  }
+
+  .current-step-text{
+    font-size:15px;
+    line-height:1.45;
+  }
+}
+
+@media (max-width: 900px) and (orientation: landscape){
+  .search-panel{
+    width:min(360px, calc(100vw - 20px));
+    right:auto;
+  }
+
+  .routes-panel{
+    left:auto;
+    right:10px;
+    width:min(390px, calc(100vw - 20px));
+    bottom:10px;
+    max-height:46vh;
+  }
+
+  .routes-panel.expanded{
+    max-height:84vh;
+  }
+
+  .compass{
+    top:auto;
+    bottom:12px;
+    right:calc(min(390px, calc(100vw - 20px)) + 20px);
+  }
 }
