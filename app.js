@@ -1,6 +1,7 @@
   const ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImFhOTA1MmJkZGYyNjRiYjRhZDA2OTcxM2NiMmJlZjQwIiwiaCI6Im11cm11cjY0In0=";
   const OBSTACLE_STORE_KEY = "rutas_peatonales_obstacles_v1";
   const OBSTACLE_SYNC_MS = 30000;
+  const WEATHER_API_BASE = "https://api.open-meteo.com/v1/forecast";
   const ACCESSIBILITY_SETTINGS_KEY = "rutas_peatonales_accessibility_v1";
   const USER_PROFILE_KEY = "rutas_peatonales_user_profile_v1";
   const RECENT_ROUTES_KEY = "rutas_peatonales_recent_routes_v1";
@@ -109,6 +110,12 @@
   const currentStepBox = document.getElementById("currentStepBox");
   const currentStepText = document.getElementById("currentStepText");
   const userSummary = document.getElementById("userSummary");
+  const weatherPanel = document.getElementById("weatherPanel");
+  const weatherTitle = document.getElementById("weatherTitle");
+  const weatherBadge = document.getElementById("weatherBadge");
+  const weatherCurrent = document.getElementById("weatherCurrent");
+  const weatherForecast = document.getElementById("weatherForecast");
+  const weatherUpdated = document.getElementById("weatherUpdated");
   const frequentRoutesList = document.getElementById("frequentRoutesList");
 
   const synth = window.speechSynthesis;
@@ -147,6 +154,15 @@
   };
   let userProfile = null;
   let recentRoutes = [];
+  let weatherState = {
+    loading: false,
+    loaded: false,
+    error: "",
+    current: null,
+    daily: [],
+    locationLabel: "",
+    updatedAt: null
+  };
 
   function createUserIcon(heading = 0) {
     const rotation = Number.isFinite(heading) ? heading : 0;
@@ -604,6 +620,198 @@
     screenReaderTimer = setTimeout(() => {
       screenReaderLive.textContent = message;
     }, 20);
+  }
+
+  function getWeatherCodeInfo(code) {
+    const numericCode = Number(code);
+    if (numericCode === 0) return { label: "Soleado", emoji: "☀️", category: "clear" };
+    if ([1, 2].includes(numericCode)) return { label: numericCode === 1 ? "Mayormente soleado" : "Parcialmente nublado", emoji: numericCode === 1 ? "🌤️" : "⛅", category: "clear" };
+    if (numericCode === 3) return { label: "Nublado", emoji: "☁️", category: "cloudy" };
+    if ([45, 48].includes(numericCode)) return { label: "Neblina", emoji: "🌫️", category: "cloudy" };
+    if ([51, 53, 55, 56, 57].includes(numericCode)) return { label: "Llovizna", emoji: "🌦️", category: "rainy" };
+    if ([61, 63, 65, 66, 67, 80, 81, 82].includes(numericCode)) return { label: "Lluvia", emoji: "🌧️", category: "rainy" };
+    if ([71, 73, 75, 77, 85, 86].includes(numericCode)) return { label: "Nieve", emoji: "❄️", category: "cloudy" };
+    if ([95, 96, 99].includes(numericCode)) return { label: "Tormenta", emoji: "⛈️", category: "rainy" };
+    return { label: "Clima variable", emoji: "🌡️", category: "cloudy" };
+  }
+
+  function getWeatherAdvice(code, precipitationProbability = 0, windSpeed = 0) {
+    const weather = getWeatherCodeInfo(code);
+    const precipitation = Number(precipitationProbability) || 0;
+    const wind = Number(windSpeed) || 0;
+
+    if (weather.category === "rainy" || precipitation >= 60) {
+      return "Hoy conviene salir con paraguas o impermeable y dar más tiempo al desplazamiento.";
+    }
+    if (weather.category === "cloudy") {
+      return wind >= 25 ? "Cielo nublado y con viento. Mantén precaución al caminar." : "El día estará nublado. Puedes caminar con normalidad, pero atento al cambio de clima.";
+    }
+    return wind >= 25 ? "El día será despejado, pero con bastante viento. Mantén atención al caminar." : "El día se ve estable y más favorable para caminar.";
+  }
+
+  function formatWeatherDay(dateValue, index) {
+    const date = new Date(dateValue);
+    if (index === 0) return "Hoy";
+    return new Intl.DateTimeFormat("es-PE", { weekday: "short" }).format(date).replace(".", "");
+  }
+
+  function renderWeatherPanel() {
+    if (!weatherPanel || !weatherCurrent || !weatherForecast || !weatherBadge || !weatherUpdated) return;
+
+    weatherPanel.classList.remove("loading", "clear", "cloudy", "rainy", "error");
+
+    if (weatherState.loading) weatherPanel.classList.add("loading");
+    if (weatherState.error) weatherPanel.classList.add("error");
+
+    if (weatherState.loading && !weatherState.current) {
+      weatherBadge.textContent = "⏳";
+      weatherUpdated.textContent = "Consultando el clima...";
+      weatherCurrent.textContent = "Estoy buscando el pronóstico de hoy para tu zona.";
+      weatherForecast.innerHTML = "";
+      return;
+    }
+
+    if (weatherState.error && !weatherState.current) {
+      weatherBadge.textContent = "⚠️";
+      weatherUpdated.textContent = weatherState.error;
+      weatherCurrent.textContent = "No pude cargar el clima todavía.";
+      weatherForecast.innerHTML = "";
+      return;
+    }
+
+    const current = weatherState.current;
+    const currentInfo = getWeatherCodeInfo(current?.weatherCode);
+    weatherPanel.classList.add(currentInfo.category);
+    weatherBadge.textContent = currentInfo.emoji;
+    weatherTitle.textContent = `Clima de ${weatherState.locationLabel || "hoy"}`;
+    weatherUpdated.textContent = weatherState.updatedAt
+      ? `Actualizado ${new Intl.DateTimeFormat("es-PE", { hour: "2-digit", minute: "2-digit" }).format(new Date(weatherState.updatedAt))}`
+      : "Pronóstico actualizado";
+
+    const temperature = Number.isFinite(current?.temperature) ? Math.round(current.temperature) : null;
+    const wind = Number.isFinite(current?.windSpeed) ? Math.round(current.windSpeed) : 0;
+    const humidity = Number.isFinite(current?.humidity) ? Math.round(current.humidity) : null;
+    const precipitation = Number.isFinite(current?.precipitationProbability) ? Math.round(current.precipitationProbability) : 0;
+    const advice = getWeatherAdvice(current?.weatherCode, precipitation, wind);
+
+    weatherCurrent.textContent = `${currentInfo.label}. ${temperature !== null ? `${temperature}°C` : "Temperatura no disponible"}. Humedad ${humidity !== null ? `${humidity}%` : "no disponible"}. Viento ${wind} km/h. ${advice}`;
+
+    const dailyItems = Array.isArray(weatherState.daily) ? weatherState.daily.slice(0, 3) : [];
+    weatherForecast.innerHTML = dailyItems.map((item, index) => {
+      const info = getWeatherCodeInfo(item.weatherCode);
+      const dayName = formatWeatherDay(item.date, index);
+      const maxTemp = Number.isFinite(item.temperatureMax) ? Math.round(item.temperatureMax) : "--";
+      const minTemp = Number.isFinite(item.temperatureMin) ? Math.round(item.temperatureMin) : "--";
+      const precip = Number.isFinite(item.precipitationProbability) ? Math.round(item.precipitationProbability) : 0;
+      return `
+        <div class="weather-day">
+          <div class="weather-day-name">${dayName}</div>
+          <div class="weather-day-temp">${info.emoji} ${info.label} · Máx ${maxTemp}° / Mín ${minTemp}°</div>
+          <div class="weather-day-desc">Prob. lluvia ${precip}%</div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  function announceWeatherForUser() {
+    if (!weatherState.loaded || !weatherState.current) return;
+
+    const current = weatherState.current;
+    const info = getWeatherCodeInfo(current.weatherCode);
+    const temperature = Number.isFinite(current.temperature) ? Math.round(current.temperature) : null;
+    const wind = Number.isFinite(current.windSpeed) ? Math.round(current.windSpeed) : 0;
+    const precipitation = Number.isFinite(current.precipitationProbability) ? Math.round(current.precipitationProbability) : 0;
+    const advice = getWeatherAdvice(current.weatherCode, precipitation, wind);
+    const weatherText = temperature !== null
+      ? `Clima de hoy: ${temperature} grados, ${info.label.toLowerCase()}. Viento de ${wind} kilómetros por hora. ${advice}`
+      : `Clima de hoy: ${info.label.toLowerCase()}. ${advice}`;
+
+    speakText(weatherText, true);
+    announceForScreenReader(weatherText, "polite");
+  }
+
+  async function loadWeatherForecast(location) {
+    const lat = Number(location?.lat);
+    const lng = Number(location?.lng);
+
+    weatherState = {
+      loading: true,
+      loaded: false,
+      error: "",
+      current: null,
+      daily: [],
+      locationLabel: location?.label || "tu ubicación",
+      updatedAt: null
+    };
+    renderWeatherPanel();
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      weatherState.loading = false;
+      weatherState.error = "No se pudo consultar el clima porque falta la ubicación.";
+      renderWeatherPanel();
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams({
+        latitude: String(lat),
+        longitude: String(lng),
+        current: "temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m,precipitation,precipitation_probability",
+        daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        forecast_days: "3",
+        timezone: "auto"
+      });
+
+      const response = await fetch(`${WEATHER_API_BASE}?${params.toString()}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.reason || data?.error || "No se pudo cargar el clima.");
+      }
+
+      weatherState = {
+        loading: false,
+        loaded: true,
+        error: "",
+        current: data.current
+          ? {
+              temperature: Number(data.current.temperature_2m),
+              weatherCode: Number(data.current.weather_code),
+              humidity: Number(data.current.relative_humidity_2m),
+              windSpeed: Number(data.current.wind_speed_10m),
+              precipitation: Number(data.current.precipitation),
+              precipitationProbability: Number(data.current.precipitation_probability)
+            }
+          : null,
+        daily: Array.isArray(data.daily?.time)
+          ? data.daily.time.map((date, index) => ({
+              date,
+              weatherCode: Number(data.daily.weather_code?.[index]),
+              temperatureMax: Number(data.daily.temperature_2m_max?.[index]),
+              temperatureMin: Number(data.daily.temperature_2m_min?.[index]),
+              precipitationProbability: Number(data.daily.precipitation_probability_max?.[index])
+            }))
+          : [],
+        locationLabel: location?.label || "tu ubicación",
+        updatedAt: new Date().toISOString()
+      };
+
+      renderWeatherPanel();
+      announceWeatherForUser();
+    } catch (error) {
+      console.error(error);
+      weatherState = {
+        loading: false,
+        loaded: false,
+        error: "No se pudo cargar el clima de hoy.",
+        current: null,
+        daily: [],
+        locationLabel: location?.label || "tu ubicación",
+        updatedAt: null
+      };
+      renderWeatherPanel();
+      announceForScreenReader("No se pudo cargar el clima de hoy.", "assertive");
+    }
   }
 
   function getConditionLabel(condition) {
@@ -1090,6 +1298,12 @@
     toggleRoutesPanelBtn.textContent = routesPanelExpanded ? "▼" : "▲";
     toggleRoutesPanelBtn.title = routesPanelExpanded ? "Contraer panel" : "Expandir panel";
     toggleRoutesPanelBtn.setAttribute("aria-label", routesPanelExpanded ? "Contraer panel de rutas" : "Expandir panel de rutas");
+    
+    if (routesPanelExpanded) {
+      speakText("Panel de rutas expandido.", false);
+    } else {
+      speakText("Panel de rutas contraído.", false);
+    }
   }
 
   function toggleRoutesPanel() {
@@ -1117,6 +1331,12 @@
         ? "Cerrar herramientas de accesibilidad"
         : "Abrir herramientas de accesibilidad";
       accessDockToggleBtn.setAttribute("aria-label", accessDockOpen ? "Cerrar herramientas de accesibilidad" : "Abrir herramientas de accesibilidad");
+      
+      if (accessDockOpen) {
+        speakText("Panel de accesibilidad abierto.", false);
+      } else {
+        speakText("Panel de accesibilidad cerrado.", false);
+      }
     }
   }
 
@@ -2895,10 +3115,58 @@
     speakText("Mapa centrado en tu ubicación.", true);
   }
 
+  async function loadApproximateLocation() {
+    try {
+      const response = await fetch("https://ipapi.co/json/");
+      if (!response.ok) throw new Error("No se pudo obtener ubicación aproximada.");
+
+      const data = await response.json();
+      const lat = Number(data.latitude);
+      const lng = Number(data.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        throw new Error("La ubicación aproximada no es válida.");
+      }
+
+      userLocation = { lat, lng };
+
+      if (userMarker) map.removeLayer(userMarker);
+      userMarker = L.marker([lat, lng]).addTo(map).bindPopup("Tu ubicación aproximada").openPopup();
+      map.setView([lat, lng], 17);
+
+      const locationLabel = [data.city, data.region, data.country_name].filter(Boolean).join(", ") || "tu ubicación aproximada";
+      setRoutesMessage(`
+        <div class="status ok">
+          No se pudo usar GPS, pero obtuvimos una ubicación aproximada. Escribe un destino y elige una sugerencia.
+        </div>
+      `);
+      speakText("No se pudo usar el GPS. Cargué una ubicación aproximada para continuar.", true);
+      await loadWeatherForecast({ lat, lng, label: locationLabel });
+    } catch (error) {
+      console.error(error);
+      setRoutesMessage(`
+        <div class="status error">
+          No se pudo obtener tu ubicación. Abre la página en localhost o HTTPS y acepta el permiso.
+        </div>
+      `);
+      weatherState = {
+        loading: false,
+        loaded: false,
+        error: "No se pudo cargar el clima porque no hay ubicación disponible.",
+        current: null,
+        daily: [],
+        locationLabel: "",
+        updatedAt: null
+      };
+      renderWeatherPanel();
+      speakText("No se pudo obtener tu ubicación. Debes abrir la página en localhost o HTTPS y aceptar el permiso.", true);
+    }
+  }
+
   function initLocation() {
     if (!navigator.geolocation) {
-      setRoutesMessage(`<div class="status error">Tu navegador no soporta geolocalización.</div>`);
-      speakText("Tu navegador no soporta geolocalización.", true);
+      setRoutesMessage(`<div class="status error">Tu navegador no soporta geolocalización. Intentando ubicación aproximada...</div>`);
+      speakText("Tu navegador no soporta geolocalización. Intentando una ubicación aproximada.", true);
+      loadApproximateLocation();
       return;
     }
 
@@ -2918,6 +3186,12 @@
 
         map.setView([userLocation.lat, userLocation.lng], 17);
 
+        loadWeatherForecast({
+          lat: userLocation.lat,
+          lng: userLocation.lng,
+          label: "tu ubicación"
+        });
+
         setRoutesMessage(`
           <div class="status ok">
             Ubicación lista. Escribe un destino y elige una sugerencia.
@@ -2930,10 +3204,11 @@
         console.error(error);
         setRoutesMessage(`
           <div class="status error">
-            No se pudo obtener tu ubicación. Abre la página en localhost o HTTPS y acepta el permiso.
+            No se pudo obtener tu ubicación. Intentando ubicación aproximada...
           </div>
         `);
-        speakText("No se pudo obtener tu ubicación. Debes abrir la página en localhost o HTTPS y aceptar el permiso.", true);
+        speakText("No se pudo obtener tu ubicación. Intentaré una ubicación aproximada para continuar.", true);
+        loadApproximateLocation();
       },
       {
         enableHighAccuracy: true,
@@ -3147,11 +3422,32 @@
   mapStyleSelect.addEventListener("change", (event) => {
     setMapStyle(event.target.value);
   });
-  btnSpeak.addEventListener("click", startNavigation);
-  btnPause.addEventListener("click", pauseNavigation);
-  btnResume.addEventListener("click", resumeNavigation);
-  btnRepeat.addEventListener("click", repeatCurrentInstruction);
-  btnStop.addEventListener("click", () => stopNavigation());
+  btnSpeak.addEventListener("click", () => {
+    if (!navigationActive) {
+      speakText("Iniciando navegación. Por favor espera.", true);
+    }
+    startNavigation();
+  });
+  btnPause.addEventListener("click", () => {
+    if (navigationActive && !navigationPaused) {
+      speakText("Navegación pausada.", true);
+    }
+    pauseNavigation();
+  });
+  btnResume.addEventListener("click", () => {
+    if (navigationPaused) {
+      speakText("Reanudando navegación.", true);
+    }
+    resumeNavigation();
+  });
+  btnRepeat.addEventListener("click", () => {
+    speakText("Repitiendo instrucción actual.", false);
+    repeatCurrentInstruction();
+  });
+  btnStop.addEventListener("click", () => {
+    speakText("Navegación detenida.", true);
+    stopNavigation();
+  });
   if (btnQuickPause) {
     btnQuickPause.addEventListener("click", handleQuickPauseToggle);
   }
@@ -3173,6 +3469,7 @@
   setMapStyle("streets", true);
   applyAccessibilityProfile(true);
   updateUserSummary();
+  renderWeatherPanel();
   renderRecentRoutes();
   setRoutesPanelExpanded(false);
   loadObstacles();

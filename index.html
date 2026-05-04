@@ -109,6 +109,18 @@
 
   <div id="userSummary" class="user-summary" aria-live="polite">Perfil no configurado.</div>
 
+  <div id="weatherPanel" class="weather-card" role="region" aria-labelledby="weatherTitle" aria-live="polite">
+    <div class="weather-card-top">
+      <div>
+        <div id="weatherTitle" class="weather-title">Clima de hoy</div>
+        <div id="weatherUpdated" class="weather-updated">Obteniendo ubicación...</div>
+      </div>
+      <div id="weatherBadge" class="weather-badge">⏳</div>
+    </div>
+    <div id="weatherCurrent" class="weather-current">Te diré si hoy estará soleado, nublado o lluvioso.</div>
+    <div id="weatherForecast" class="weather-forecast"></div>
+  </div>
+
   <div class="frequent-routes-box" aria-label="Rutas seguidas">
     <div class="frequent-routes-title">Rutas seguidas</div>
     <div id="frequentRoutesList" class="frequent-routes-list">Aún no tienes rutas guardadas.</div>
